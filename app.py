@@ -104,8 +104,9 @@ def generate_with_images(
     content.append({"type": "input_text", "text": SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)})
 
     response = client.responses.create(
-        model="gpt-image-1",
+        model="gpt-4o",
         input=[{"role": "user", "content": content}],
+        tools=[{"type": "image_generation"}],
     )
 
     for item in response.output:
