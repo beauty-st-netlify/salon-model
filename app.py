@@ -14,13 +14,13 @@ for key, val in [
     ("face_img", None),
     ("outfit_img", None),
     ("bg_img", None),
-    ("result_img", None),
-    ("drive_url", None),
+    ("result_imgs", None),   # list of 3 images
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
 
 FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
+NUM_PATTERNS = 3
 
 try:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -237,30 +237,31 @@ elif step == 3:
 
 # ===== STEP 4: 生成 =====
 elif step == 4:
-    if st.session_state.result_img is None:
-        st.subheader("⚙️ 画像を生成しています...")
+    if st.session_state.result_imgs is None:
+        st.subheader(f"⚙️ {NUM_PATTERNS}パターン生成中...")
 
         progress = st.progress(0)
         status = st.empty()
+        results = []
 
         try:
-            status.info("画像を解析・合成中...（1〜2分かかります）")
-            progress.progress(30)
+            for i in range(NUM_PATTERNS):
+                status.info(f"パターン {i+1} / {NUM_PATTERNS} を生成中...（1〜2分かかります）")
+                progress.progress(int((i / NUM_PATTERNS) * 90))
 
-            result = generate_with_images(
-                st.session_state.hair_img,
-                st.session_state.face_img,
-                st.session_state.outfit_img,
-                st.session_state.bg_img,
-            )
+                img = generate_with_images(
+                    st.session_state.hair_img,
+                    st.session_state.face_img,
+                    st.session_state.outfit_img,
+                    st.session_state.bg_img,
+                )
+                results.append(img)
 
-            status.info("Google Drive に保存中...")
-            progress.progress(90)
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            drive_url = save_to_drive(result, f"サロンモデル_{ts}.png")
+                # Drive保存
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_to_drive(img, f"サロンモデル_{ts}_パターン{i+1}.png")
 
-            st.session_state.result_img = result
-            st.session_state.drive_url = drive_url
+            st.session_state.result_imgs = results
             progress.progress(100)
             st.rerun()
 
@@ -273,25 +274,29 @@ elif step == 4:
 
     else:
         st.subheader("✅ 生成完了！")
-        st.image(st.session_state.result_img, use_container_width=True)
-        st.markdown("")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts_base = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        for i, img in enumerate(st.session_state.result_imgs):
+            st.markdown(f"**パターン {i+1}**")
+            st.image(img, use_container_width=True)
             st.download_button(
-                "⬇️ ダウンロード",
-                data=st.session_state.result_img,
-                file_name=f"salon_model_{ts}.png",
+                f"⬇️ パターン{i+1} をダウンロード",
+                data=img,
+                file_name=f"salon_model_{ts_base}_{i+1}.png",
                 mime="image/png",
                 use_container_width=True,
+                key=f"dl_{i}",
             )
-        with col2:
-            if st.session_state.drive_url:
-                st.link_button("📁 Driveで確認", st.session_state.drive_url, use_container_width=True)
+            st.markdown("")
 
         st.markdown("---")
-        if st.button("🔄 もう一度作る", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 同じ素材で再生成", use_container_width=True):
+                st.session_state.result_imgs = None
+                st.rerun()
+        with col2:
+            if st.button("🆕 最初からやり直す", use_container_width=True):
+                for k in list(st.session_state.keys()):
+                    del st.session_state[k]
+                st.rerun()
