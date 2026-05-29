@@ -133,10 +133,10 @@ def build_prompt(hair_desc: str, face_desc: str | None, outfit_desc: str | None,
 
 def generate_image(prompt: str) -> bytes:
     resp = client.images.generate(
-        model="dall-e-3",
+        model="gpt-image-1",
         prompt=prompt,
         size="1024x1024",
-        quality="hd",
+        quality="high",
         n=1,
     )
     url = resp.data[0].url
