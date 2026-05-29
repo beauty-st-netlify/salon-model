@@ -132,6 +132,7 @@ def build_prompt(hair_desc: str, face_desc: str | None, outfit_desc: str | None,
 
 
 def generate_image(prompt: str) -> bytes:
+    import base64 as b64lib
     resp = client.images.generate(
         model="gpt-image-1",
         prompt=prompt,
@@ -139,8 +140,10 @@ def generate_image(prompt: str) -> bytes:
         quality="high",
         n=1,
     )
-    url = resp.data[0].url
-    return requests.get(url, timeout=60).content
+    item = resp.data[0]
+    if hasattr(item, "b64_json") and item.b64_json:
+        return b64lib.b64decode(item.b64_json)
+    return requests.get(item.url, timeout=60).content
 
 
 def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
