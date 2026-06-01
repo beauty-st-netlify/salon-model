@@ -2,8 +2,6 @@ import streamlit as st
 import openai
 import base64
 import datetime
-import json
-import requests
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
@@ -19,7 +17,6 @@ for key, val in [
     if key not in st.session_state:
         st.session_state[key] = val
 
-FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 3
 
 try:
@@ -183,25 +180,6 @@ def generate_with_images(
     raise Exception("画像が生成されませんでした。もう一度お試しください。")
 
 
-def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
-    try:
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaInMemoryUpload
-        from google.oauth2 import service_account
-
-        creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-        creds = service_account.Credentials.from_service_account_info(
-            creds_info,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        service = build("drive", "v3", credentials=creds)
-        meta = {"name": filename, "parents": [FOLDER_ID]}
-        media = MediaInMemoryUpload(image_bytes, mimetype="image/png")
-        f = service.files().create(body=meta, media_body=media, fields="id,webViewLink").execute()
-        return f.get("webViewLink")
-    except Exception as e:
-        st.warning(f"Drive保存をスキップしました: {e}")
-        return None
 
 
 # ---------- UI ----------
@@ -324,8 +302,6 @@ elif step == 4:
                 )
                 results.append(img)
 
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_to_drive(img, f"サロンモデル_{ts}_パターン{i+1}.png")
 
             st.session_state.result_imgs = results
             progress.progress(100)
