@@ -43,7 +43,7 @@ SYSTEM_INSTRUCTION = """You are an image synthesis AI. Generate ONE composite po
 
 IMAGE ORDER AND ROLES:
 - Image 1 (REQUIRED): Hairstyle reference — highest priority
-- Image 2 (optional): Face reference — generate the face based on this person's facial features, impression, and atmosphere
+- Image 2 (optional): Face reference — use only for internal analysis of facial atmosphere and impression (do NOT copy or reproduce the face)
 - Image 3 (optional): Outfit reference — clothing only
 - Image 4 (optional): Background reference
 
@@ -160,7 +160,7 @@ def generate_with_images(
     labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
     idx = 2
     if face_bytes:
-        labels.append(f"Image {idx} = Face reference — generate the face based on this person's facial features, impression, and atmosphere.")
+        labels.append(f"Image {idx} = Face reference — internal analysis only: use this person's facial atmosphere and impression as subtle reference. Do NOT copy or reproduce the face.")
         idx += 1
     if outfit_bytes:
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
