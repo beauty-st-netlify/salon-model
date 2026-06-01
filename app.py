@@ -14,7 +14,7 @@ for key, val in [
     ("face_img", None),
     ("outfit_img", None),
     ("bg_img", None),
-    ("result_imgs", None),   # list of 3 images
+    ("result_imgs", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
@@ -39,39 +39,106 @@ def img_content(img_bytes: bytes) -> dict:
     return {"type": "input_image", "image_url": f"data:image/jpeg;base64,{to_b64(img_bytes)}"}
 
 
-SYSTEM_INSTRUCTION = """You are an image synthesis AI. Generate ONE composite portrait image based on the reference images provided.
+SYSTEM_INSTRUCTION = """You are an image synthesis AI. Generate ONE composite portrait image.
 
 IMAGE ORDER AND ROLES:
-- Image 1 (REQUIRED): Hairstyle reference — reproduce this hairstyle with absolute fidelity
-- Image 2 (if provided): Face reference — use this person's facial impression
-- Image 3 (if provided): Outfit reference — use only the clothing, remove all bags/accessories
-- Image 4 (if provided): Background reference — use this background
+- Image 1 (REQUIRED): Hairstyle reference — highest priority
+- Image 2 (optional): Face reference — use for facial impression only (internal analysis only, do not output face)
+- Image 3 (optional): Outfit reference — clothing only
+- Image 4 (optional): Background reference
 
-HAIRSTYLE RULES (highest priority):
-- Reproduce the hairstyle EXACTLY: bangs, part line, length, layers, silhouette, volume, hair flow, curl, ends
-- Hair color: reproduce the exact gradient from root to mid to ends — no color correction allowed
-- Hair is a fixed composite element — do not modify or regenerate it
-- Maintain maximum resolution and detail: fine strands, strand boundaries, transparency in bangs
+===== HAIRSTYLE (HIGHEST PRIORITY — TREAT AS FULLY LOCKED ELEMENT) =====
+Extract and reproduce ALL of the following with EXACT fidelity:
+- Bangs: bundle structure, position, thickness, gaps, transparency — CENTER PART FORBIDDEN
+- Part line: exact position, do NOT move
+- Length, layers, silhouette (width/height/volume): exact match
+- Hair flow direction: exact match
+- Curl pattern, ends: maintain inward curl exactly
+- Left-right balance, face-framing hair: exact match
 
-COLOR RULES:
-- Hair color, outfit color, and background color are independently controlled — do not blend or harmonize them
-- Outfit color must exactly match the reference — no darkening, desaturation, or tone unification
-- If outfit is red, output must be red
+HAIRSTYLE IS AN IMMOVABLE COMPOSITE PART — FORBIDDEN:
+- Any modification, correction, or regeneration of the hair
+- Resizing, compressing, blurring, smoothing, redrawing, or regenerating
+REQUIRED:
+- Treat hair as the topmost front layer at all times
+- Preserve: fine strands, strand boundaries, bang transparency, strand tip thinness, texture grain
+- Hair resolution must equal or exceed the hairstyle reference image
 
-OUTFIT RULES:
-- Extract clothing only — delete all bags, handbags, straps, accessories, and jewelry
-- Do not generate any bags or props
+===== HAIR COLOR (HIGHEST PRIORITY) =====
+Hair color = pixel-exact match to hairstyle reference. FORBIDDEN ALL of the following:
+- White balance correction
+- Tone correction
+- Color temperature correction
+- Saturation correction
+- Brightness correction
+- Contrast correction
+- Color matching
+- Background color adaptation
+- Any averaging or unification of color
 
-POSE RULES:
-- Hands must be completely empty — no holding anything
-- Hands must be placed at sides of body or near thighs — NOT near face, chin, cheeks, ears, neck, or hair
-- Forbidden poses: hand on chin, touching cheeks, fingers near face, touching hair
+HAIR COLOR DISTRIBUTION — treat as multi-zone, NOT single color:
+- Root color: exact hue/saturation/brightness match
+- Mid-shaft color: exact hue/saturation/brightness match
+- End color: exact hue/saturation/brightness match
+- Reproduce the full gradient from root to ends with complete accuracy
+- No flattening, averaging, or single-color substitution
 
-COMPOSITION:
-- Bust-up portrait, face position fixed
-- Ultra-sharp, maximum resolution, no blur or smoothing
+===== COLOR INDEPENDENCE RULE =====
+Hair color, outfit color, and background color are INDEPENDENTLY controlled. NEVER blend or harmonize.
+- Hair color follows ONLY the hairstyle reference
+- Outfit color follows ONLY the outfit reference
+- Background color follows ONLY the background reference
+- FORBIDDEN: changing outfit color based on hair color or background color
+- FORBIDDEN: changing hair color based on background color
+- If outfit input is red → output MUST be red. No darkening, desaturation, or tone unification.
 
-OUTPUT: Generate the composite image only. No text."""
+===== OUTFIT PROCESSING =====
+Extract clothing ONLY. Completely delete:
+- All bags, handbags, straps, small items, accessories, jewelry, decorations
+Do NOT generate any bags or props.
+Outfit color: exact match to reference — no darkening, desaturation, or harmonization.
+
+===== POSE CONTROL =====
+Hands MUST be completely empty — holding nothing.
+Required hand placement: at sides of body, or near thighs — far from face.
+FORBIDDEN hand zones: chin, cheeks, mouth, nose, eyes, ears, neck.
+FORBIDDEN poses: hand on chin, touching cheeks, fingers near face, touching hair.
+
+===== SCALE AND COMPOSITION =====
+- Face size, head size, distance, position: exact match to hairstyle reference
+- Aspect ratio: exact match to hairstyle reference
+- Bust-up portrait ratio maintained
+- Face position fixed
+
+===== RESOLUTION AND QUALITY =====
+- Edge sharpness: maximum
+- Detail: maximum
+- FORBIDDEN: blur, smoothing, softening anywhere
+
+===== VERIFICATION — CHECK ALL BEFORE OUTPUT =====
+If ANY of the following fails, regenerate until all pass:
+□ Hairstyle intact — no modification
+□ Bangs position and structure correct
+□ Hair color exactly matches reference
+□ Hair color gradient (root/mid/end) preserved
+□ Outfit color exactly matches reference
+□ Outfit design intact
+□ No color correction applied anywhere
+□ Resolution not reduced
+□ Hands are NOT near face
+□ No bags, accessories, or props generated
+
+===== PRIORITY ORDER =====
+1. Hairstyle — highest
+2. Hair color — highest
+3. Outfit — highest
+4. Outfit color — highest
+5. Background
+6. Resolution
+7. Composition
+
+===== OUTPUT =====
+Output the composite image ONLY. No text, no description, no explanation, no questions, no symbols."""
 
 
 def generate_with_images(
@@ -93,7 +160,7 @@ def generate_with_images(
     labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
     idx = 2
     if face_bytes:
-        labels.append(f"Image {idx} = Face reference.")
+        labels.append(f"Image {idx} = Face reference (internal use only).")
         idx += 1
     if outfit_bytes:
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
@@ -257,7 +324,6 @@ elif step == 4:
                 )
                 results.append(img)
 
-                # Drive保存
                 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 save_to_drive(img, f"サロンモデル_{ts}_パターン{i+1}.png")
 
