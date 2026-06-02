@@ -45,7 +45,11 @@ IMAGE ORDER AND ROLES:
 - Image 4 (optional): Background reference
 
 ===== HAIRSTYLE (HIGHEST PRIORITY — TREAT AS FULLY LOCKED ELEMENT) =====
-Extract and reproduce ALL of the following with EXACT fidelity:
+CRITICAL: The hairstyle reference image contains a person. Extract ONLY the HAIR from this image.
+DO NOT use the face, skin, body, or any features of the person in the hairstyle reference image.
+Generate a completely new face — do NOT copy the face from the hairstyle reference image.
+
+Extract and reproduce ALL of the following from the hair ONLY, with EXACT fidelity:
 - Bangs: bundle structure, position, thickness, gaps, transparency — CENTER PART FORBIDDEN
 - Part line: exact position, do NOT move
 - Length, layers, silhouette (width/height/volume): exact match
