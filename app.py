@@ -5,7 +5,6 @@ import datetime
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
-# ---------- セッション初期化 ----------
 for key, val in [
     ("step", 0),
     ("hair_img", None),
@@ -26,196 +25,123 @@ except Exception:
     st.stop()
 
 
-# ---------- ユーティリティ ----------
-
 def to_b64(img_bytes: bytes) -> str:
     return base64.b64encode(img_bytes).decode()
 
 
-def img_content(img_bytes: bytes) -> dict:
-    return {"type": "input_image", "image_url": f"data:image/jpeg;base64,{to_b64(img_bytes)}"}
-
-
-SYSTEM_INSTRUCTION = """You are an image synthesis AI. Generate ONE composite portrait image.
-
-IMAGE ORDER AND ROLES:
-- Image 1 (REQUIRED): Hairstyle reference — highest priority
-- Image 2 (optional): Face reference — use only for internal analysis of facial atmosphere and impression (do NOT copy or reproduce the face)
-- Image 3 (optional): Outfit reference — clothing only
-- Image 4 (optional): Background reference
-
-===== HAIRSTYLE (HIGHEST PRIORITY — TREAT AS FULLY LOCKED ELEMENT) =====
-CRITICAL: The hairstyle reference image contains a person. Extract ONLY the HAIR from this image.
-DO NOT use the face, skin, body, or any features of the person in the hairstyle reference image.
-Generate a completely new face — do NOT copy the face from the hairstyle reference image.
-
-Extract and reproduce ALL of the following from the hair ONLY, with EXACT fidelity:
-- Bangs: bundle structure, position, thickness, gaps, transparency — CENTER PART FORBIDDEN
-- Part line: exact position, do NOT move
-- Length, layers, silhouette (width/height/volume): exact match
-- Hair flow direction: exact match
-- Curl pattern, ends: maintain inward curl exactly
-- Left-right balance, face-framing hair: exact match
-
-HAIRSTYLE IS AN IMMOVABLE COMPOSITE PART — FORBIDDEN:
-- Any modification, correction, or regeneration of the hair
-- Resizing, compressing, blurring, smoothing, redrawing, or regenerating
-REQUIRED:
-- Treat hair as the topmost front layer at all times
-- Preserve: fine strands, strand boundaries, bang transparency, strand tip thinness, texture grain
-- Hair resolution must equal or exceed the hairstyle reference image
-
-===== HAIR COLOR (HIGHEST PRIORITY) =====
-Hair color = pixel-exact match to hairstyle reference. FORBIDDEN ALL of the following:
-- White balance correction
-- Tone correction
-- Color temperature correction
-- Saturation correction
-- Brightness correction
-- Contrast correction
-- Color matching
-- Background color adaptation
-- Any averaging or unification of color
-
-HAIR COLOR DISTRIBUTION — treat as multi-zone, NOT single color:
-- Root color: exact hue/saturation/brightness match
-- Mid-shaft color: exact hue/saturation/brightness match
-- End color: exact hue/saturation/brightness match
-- Reproduce the full gradient from root to ends with complete accuracy
-- No flattening, averaging, or single-color substitution
-
-===== COLOR INDEPENDENCE RULE =====
-Hair color, outfit color, and background color are INDEPENDENTLY controlled. NEVER blend or harmonize.
-- Hair color follows ONLY the hairstyle reference
-- Outfit color follows ONLY the outfit reference
-- Background color follows ONLY the background reference
-- FORBIDDEN: changing outfit color based on hair color or background color
-- FORBIDDEN: changing hair color based on background color
-- If outfit input is red → output MUST be red. No darkening, desaturation, or tone unification.
-
-===== OUTFIT PROCESSING =====
-Extract clothing ONLY. Completely delete:
-- All bags, handbags, straps, small items, accessories, jewelry, decorations
-Do NOT generate any bags or props.
-Outfit color: exact match to reference — no darkening, desaturation, or harmonization.
-
-===== POSE CONTROL =====
-Hands MUST be completely empty — holding nothing.
-Required hand placement: at sides of body, or near thighs — far from face.
-FORBIDDEN hand zones: chin, cheeks, mouth, nose, eyes, ears, neck.
-FORBIDDEN poses: hand on chin, touching cheeks, fingers near face, touching hair.
-
-===== SCALE AND COMPOSITION =====
-- Face size, head size, distance, position: exact match to hairstyle reference
-- Aspect ratio: exact match to hairstyle reference
-- Bust-up portrait ratio maintained
-- Face position fixed
-
-===== RESOLUTION AND QUALITY =====
-- Edge sharpness: maximum
-- Detail: maximum
-- FORBIDDEN: blur, smoothing, softening anywhere
-
-===== VERIFICATION — CHECK ALL BEFORE OUTPUT =====
-If ANY of the following fails, regenerate until all pass:
-□ Hairstyle intact — no modification
-□ Bangs position and structure correct
-□ Hair color exactly matches reference
-□ Hair color gradient (root/mid/end) preserved
-□ Outfit color exactly matches reference
-□ Outfit design intact
-□ No color correction applied anywhere
-□ Resolution not reduced
-□ Hands are NOT near face
-□ No bags, accessories, or props generated
-
-===== PRIORITY ORDER =====
-1. Hairstyle — highest
-2. Hair color — highest
-3. Outfit — highest
-4. Outfit color — highest
-5. Background
-6. Resolution
-7. Composition
-
-===== OUTPUT =====
-Output the composite image ONLY. No text, no description, no explanation, no questions, no symbols."""
-
-
-def analyze_face(face_bytes: bytes) -> str:
+def analyze_image(img_bytes: bytes, instruction: str, max_tokens: int = 400) -> str:
     response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{to_b64(face_bytes)}"},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Analyze this person's facial features and atmosphere in detail. "
-                            "Describe: face shape, eye shape and color, nose shape, lip shape, "
-                            "eyebrow style, skin tone, overall facial impression and atmosphere. "
-                            "Be specific and detailed. Output only the description, no other text."
-                        ),
-                    },
-                ],
-            }
-        ],
-        max_tokens=300,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{to_b64(img_bytes)}"}},
+                {"type": "text", "text": instruction},
+            ],
+        }],
+        max_tokens=max_tokens,
     )
     return response.choices[0].message.content.strip()
 
 
-def generate_with_images(
-    hair_bytes: bytes,
-    face_bytes: bytes | None,
-    outfit_bytes: bytes | None,
-    bg_bytes: bytes | None,
-    face_description: str | None = None,
-) -> bytes:
-    content = []
+def analyze_hair(hair_bytes: bytes) -> str:
+    return analyze_image(hair_bytes, (
+        "Analyze the hairstyle in this image in extreme detail. Describe:\n"
+        "- Bangs: shape, thickness, position, transparency, bundle structure\n"
+        "- Part line: exact location (center/left/right)\n"
+        "- Length: exact length (above ears / chin / shoulder / mid-back etc)\n"
+        "- Layers and silhouette shape\n"
+        "- Volume and fullness\n"
+        "- Hair flow direction\n"
+        "- Curl pattern and end shape (straight/inward curl/outward/wavy)\n"
+        "- Left-right balance\n"
+        "- EXACT hair color: describe root color, mid-shaft color, end color separately. "
+        "Specify precise color (e.g. 'dark brown roots fading to warm caramel mid-shaft and honey blonde ends'). "
+        "Note any highlights, gradient, or ombre.\n"
+        "- Hair texture (smooth/silky/coarse/fluffy)\n"
+        "Output only the description, no other text."
+    ), max_tokens=600)
 
-    content.append(img_content(hair_bytes))
-    if outfit_bytes:
-        content.append(img_content(outfit_bytes))
-    if bg_bytes:
-        content.append(img_content(bg_bytes))
 
-    labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
-    idx = 2
-    if outfit_bytes:
-        labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
-        idx += 1
-    if bg_bytes:
-        labels.append(f"Image {idx} = Background reference.")
+def analyze_face(face_bytes: bytes) -> str:
+    return analyze_image(face_bytes, (
+        "Analyze this person's facial features in detail. Describe:\n"
+        "- Face shape (oval/round/square/heart etc)\n"
+        "- Eye shape, size, color, and expression\n"
+        "- Eyebrow shape and thickness\n"
+        "- Nose shape\n"
+        "- Lip shape and fullness\n"
+        "- Skin tone\n"
+        "- Overall facial impression and atmosphere\n"
+        "- Approximate age range\n"
+        "Output only the description, no other text."
+    ), max_tokens=300)
 
-    face_instruction = ""
-    if face_description:
-        face_instruction = (
-            f"\n\n===== FACE REFERENCE (from analysis) =====\n"
-            f"Generate the face based on this detailed description:\n{face_description}\n"
-            f"Use this as the basis for the face's features and atmosphere."
-        )
 
-    content.append({"type": "input_text", "text": SYSTEM_INSTRUCTION + face_instruction + "\n\n" + " ".join(labels)})
+def analyze_outfit(outfit_bytes: bytes) -> str:
+    return analyze_image(outfit_bytes, (
+        "Analyze the clothing in this image. Describe ONLY the clothing (ignore bags, accessories, jewelry):\n"
+        "- Type of garment (top, dress, etc)\n"
+        "- EXACT color — be very specific (e.g. 'vivid red', 'dusty rose', 'navy blue')\n"
+        "- Fabric texture appearance\n"
+        "- Neckline style\n"
+        "- Sleeve style and length\n"
+        "- Any patterns, prints, or details\n"
+        "Output only the description, no other text."
+    ), max_tokens=300)
 
-    response = client.responses.create(
-        model="gpt-4o",
-        input=[{"role": "user", "content": content}],
-        tools=[{"type": "image_generation"}],
+
+def analyze_background(bg_bytes: bytes) -> str:
+    return analyze_image(bg_bytes, (
+        "Describe the background/setting in this image:\n"
+        "- Setting type (indoor studio / outdoor / salon / etc)\n"
+        "- Colors and tones\n"
+        "- Lighting style\n"
+        "- Any notable elements\n"
+        "Output only the description, no other text."
+    ), max_tokens=200)
+
+
+def build_prompt(hair_desc: str, face_desc: str | None, outfit_desc: str | None, bg_desc: str | None) -> str:
+    parts = [
+        "Professional bust-up portrait photograph of a person. Ultra-sharp focus, maximum resolution, photorealistic.",
+        "",
+        f"=== HAIRSTYLE (most important — reproduce exactly) ===\n{hair_desc}",
+        "",
+    ]
+
+    if face_desc:
+        parts.append(f"=== FACE ===\n{face_desc}")
+        parts.append("")
+
+    if outfit_desc:
+        parts.append(f"=== OUTFIT (clothing only, no bags or accessories) ===\n{outfit_desc}")
+        parts.append("")
+
+    if bg_desc:
+        parts.append(f"=== BACKGROUND ===\n{bg_desc}")
+        parts.append("")
+
+    parts.append(
+        "=== RULES ===\n"
+        "- Hands completely empty, placed at sides of body or near thighs, NOT near face\n"
+        "- Hair color must exactly match the hairstyle description — no color correction\n"
+        "- Outfit color must exactly match the outfit description — no darkening or desaturation\n"
+        "- Each color (hair/outfit/background) controlled independently\n"
+        "- Edge sharpness maximum, no blur"
     )
 
-    for item in response.output:
-        if hasattr(item, "type") and item.type == "image_generation_call":
-            return base64.b64decode(item.result)
-
-    raise Exception("画像が生成されませんでした。もう一度お試しください。")
+    return "\n".join(parts)
 
 
+def generate_image(prompt: str) -> bytes:
+    response = client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        n=1,
+        size="1024x1536",
+    )
+    return base64.b64decode(response.data[0].b64_json)
 
 
 # ---------- UI ----------
@@ -240,7 +166,6 @@ st.markdown("---")
 if step == 0:
     st.subheader("💇 ヘアスタイル画像をアップロード")
     st.caption("完成イメージのヘアスタイルの写真（必須）")
-
     uploaded = st.file_uploader("画像を選択してください", type=["jpg", "jpeg", "png"], key="u_hair")
     if uploaded:
         st.image(uploaded, width=320)
@@ -254,11 +179,9 @@ if step == 0:
 elif step == 1:
     st.subheader("👤 顔画像をアップロード")
     st.caption("顔の雰囲気・印象の参考として使用します（省略可）")
-
     uploaded = st.file_uploader("画像を選択してください", type=["jpg", "jpeg", "png"], key="u_face")
     if uploaded:
         st.image(uploaded, width=320)
-
     col1, col2 = st.columns(2)
     with col1:
         if uploaded and st.button("次へ →", type="primary", use_container_width=True):
@@ -276,11 +199,9 @@ elif step == 1:
 elif step == 2:
     st.subheader("👗 服装画像をアップロード")
     st.caption("着用させたい服装の写真（バッグ・アクセサリーは自動除去）")
-
     uploaded = st.file_uploader("画像を選択してください", type=["jpg", "jpeg", "png"], key="u_outfit")
     if uploaded:
         st.image(uploaded, width=320)
-
     col1, col2 = st.columns(2)
     with col1:
         if uploaded and st.button("次へ →", type="primary", use_container_width=True):
@@ -298,11 +219,9 @@ elif step == 2:
 elif step == 3:
     st.subheader("🏞️ 背景画像をアップロード")
     st.caption("背景として使いたい画像（省略可）")
-
     uploaded = st.file_uploader("画像を選択してください", type=["jpg", "jpeg", "png"], key="u_bg")
     if uploaded:
         st.image(uploaded, width=320)
-
     col1, col2 = st.columns(2)
     with col1:
         if uploaded and st.button("生成する →", type="primary", use_container_width=True):
@@ -320,30 +239,39 @@ elif step == 3:
 elif step == 4:
     if st.session_state.result_imgs is None:
         st.subheader(f"⚙️ {NUM_PATTERNS}パターン生成中...")
-
         progress = st.progress(0)
         status = st.empty()
         results = []
 
         try:
-            face_description = None
+            status.info("ヘアスタイルを分析中...")
+            hair_desc = analyze_hair(st.session_state.hair_img)
+            progress.progress(10)
+
+            face_desc = None
             if st.session_state.face_img:
-                status.info("顔画像を分析中...")
-                face_description = analyze_face(st.session_state.face_img)
+                status.info("顔を分析中...")
+                face_desc = analyze_face(st.session_state.face_img)
+            progress.progress(20)
+
+            outfit_desc = None
+            if st.session_state.outfit_img:
+                status.info("服装を分析中...")
+                outfit_desc = analyze_outfit(st.session_state.outfit_img)
+            progress.progress(30)
+
+            bg_desc = None
+            if st.session_state.bg_img:
+                status.info("背景を分析中...")
+                bg_desc = analyze_background(st.session_state.bg_img)
+            progress.progress(40)
+
+            prompt = build_prompt(hair_desc, face_desc, outfit_desc, bg_desc)
 
             for i in range(NUM_PATTERNS):
                 status.info(f"パターン {i+1} / {NUM_PATTERNS} を生成中...（1〜2分かかります）")
-                progress.progress(int((i / NUM_PATTERNS) * 90))
-
-                img = generate_with_images(
-                    st.session_state.hair_img,
-                    st.session_state.face_img,
-                    st.session_state.outfit_img,
-                    st.session_state.bg_img,
-                    face_description=face_description,
-                )
-                results.append(img)
-
+                progress.progress(40 + int((i / NUM_PATTERNS) * 55))
+                results.append(generate_image(prompt))
 
             st.session_state.result_imgs = results
             progress.progress(100)
@@ -358,7 +286,6 @@ elif step == 4:
 
     else:
         st.subheader("✅ 生成完了！")
-
         ts_base = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         for i, img in enumerate(st.session_state.result_imgs):
             st.markdown(f"**パターン {i+1}**")
