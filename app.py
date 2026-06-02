@@ -138,17 +138,44 @@ If ANY of the following fails, regenerate until all pass:
 Output the composite image ONLY. No text, no description, no explanation, no questions, no symbols."""
 
 
+def analyze_face(face_bytes: bytes) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{to_b64(face_bytes)}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analyze this person's facial features and atmosphere in detail. "
+                            "Describe: face shape, eye shape and color, nose shape, lip shape, "
+                            "eyebrow style, skin tone, overall facial impression and atmosphere. "
+                            "Be specific and detailed. Output only the description, no other text."
+                        ),
+                    },
+                ],
+            }
+        ],
+        max_tokens=300,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def generate_with_images(
     hair_bytes: bytes,
     face_bytes: bytes | None,
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
+    face_description: str | None = None,
 ) -> bytes:
     content = []
 
     content.append(img_content(hair_bytes))
-    if face_bytes:
-        content.append(img_content(face_bytes))
     if outfit_bytes:
         content.append(img_content(outfit_bytes))
     if bg_bytes:
@@ -156,16 +183,21 @@ def generate_with_images(
 
     labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
     idx = 2
-    if face_bytes:
-        labels.append(f"Image {idx} = Face reference — internal analysis only: use this person's facial atmosphere and impression as subtle reference. Do NOT copy or reproduce the face.")
-        idx += 1
     if outfit_bytes:
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
         idx += 1
     if bg_bytes:
         labels.append(f"Image {idx} = Background reference.")
 
-    content.append({"type": "input_text", "text": SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)})
+    face_instruction = ""
+    if face_description:
+        face_instruction = (
+            f"\n\n===== FACE REFERENCE (from analysis) =====\n"
+            f"Generate the face based on this detailed description:\n{face_description}\n"
+            f"Use this as the basis for the face's features and atmosphere."
+        )
+
+    content.append({"type": "input_text", "text": SYSTEM_INSTRUCTION + face_instruction + "\n\n" + " ".join(labels)})
 
     response = client.responses.create(
         model="gpt-4o",
@@ -290,6 +322,11 @@ elif step == 4:
         results = []
 
         try:
+            face_description = None
+            if st.session_state.face_img:
+                status.info("顔画像を分析中...")
+                face_description = analyze_face(st.session_state.face_img)
+
             for i in range(NUM_PATTERNS):
                 status.info(f"パターン {i+1} / {NUM_PATTERNS} を生成中...（1〜2分かかります）")
                 progress.progress(int((i / NUM_PATTERNS) * 90))
@@ -299,6 +336,7 @@ elif step == 4:
                     st.session_state.face_img,
                     st.session_state.outfit_img,
                     st.session_state.bg_img,
+                    face_description=face_description,
                 )
                 results.append(img)
 
