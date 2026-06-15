@@ -3,6 +3,7 @@ import openai
 import base64
 import datetime
 import json
+import io
 import requests
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
@@ -141,46 +142,48 @@ If ANY of the following fails, regenerate until all pass:
 Output the composite image ONLY. No text, no description, no explanation, no questions, no symbols."""
 
 
+def _img_file(name: str, img_bytes: bytes):
+    """OpenAI Images API に渡す file タプル (filename, データ, MIME)。"""
+    bio = io.BytesIO(img_bytes)
+    bio.name = name
+    return (name, bio, "image/jpeg")
+
+
 def generate_with_images(
     hair_bytes: bytes,
     face_bytes: bytes | None,
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
 ) -> bytes:
-    content = []
-
-    content.append(img_content(hair_bytes))
-    if face_bytes:
-        content.append(img_content(face_bytes))
-    if outfit_bytes:
-        content.append(img_content(outfit_bytes))
-    if bg_bytes:
-        content.append(img_content(bg_bytes))
-
+    # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
+    images = [_img_file("hairstyle.jpg", hair_bytes)]
     labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
     idx = 2
     if face_bytes:
+        images.append(_img_file("face.jpg", face_bytes))
         labels.append(f"Image {idx} = Face reference (internal use only).")
         idx += 1
     if outfit_bytes:
+        images.append(_img_file("outfit.jpg", outfit_bytes))
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
         idx += 1
     if bg_bytes:
+        images.append(_img_file("background.jpg", bg_bytes))
         labels.append(f"Image {idx} = Background reference.")
 
-    content.append({"type": "input_text", "text": SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)})
+    prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
 
-    response = client.responses.create(
-        model="gpt-4o",
-        input=[{"role": "user", "content": content}],
-        tools=[{"type": "image_generation"}],
+    result = client.images.edit(
+        model="gpt-image-1",
+        image=images,
+        prompt=prompt,
+        size="1024x1536",
     )
 
-    for item in response.output:
-        if hasattr(item, "type") and item.type == "image_generation_call":
-            return base64.b64decode(item.result)
-
-    raise Exception("画像が生成されませんでした。もう一度お試しください。")
+    b64 = result.data[0].b64_json
+    if not b64:
+        raise Exception("画像が生成されませんでした。もう一度お試しください。")
+    return base64.b64decode(b64)
 
 
 def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
