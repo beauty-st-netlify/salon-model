@@ -223,6 +223,8 @@ def generate_with_images(
         image=images,
         prompt=prompt,
         size="1024x1536",
+        quality="high",
+        input_fidelity="high",
     )
 
     b64 = result.data[0].b64_json
