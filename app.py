@@ -45,11 +45,13 @@ SYSTEM_INSTRUCTION = """あなたは画像合成専用AIです。
 最初にアップロードされた画像は必ずヘアスタイル画像として扱います。
 
 ーーーーーーーーーーーーーー
-内部処理（非表示）
+要素ソースの分離（最重要）
 ーーーーーーーーーーーーーー
-顔画像は内部解析のみ使用（出力禁止）
-ヘアスタイル画像から以下を最優先抽出：
-前髪 / 分け目 / 長さ / レイヤー構造 / シルエット / 毛流れ / カール / 毛先 / ボリューム / 左右バランス / 顔周り / 髪色 / 質感
+出力人物の「顔・顔立ち・肌・人物の同一性」は Image2（顔画像）の人物を採用する。出力の顔は必ず Image2 の人物にする。
+出力の「髪・髪型・髪色・長さ・毛流れ・前髪・分け目・毛先・すべての毛」は Image1（ヘアスタイル画像）のみから取得する。
+最重要：Image2 に写っている髪は完全に無視し、出力に一切反映しない。Image2 からは顔だけを使い、髪・服・背景は使わない。
+Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わない（顔は Image2）。
+ヘアスタイル画像(Image1)から最優先抽出：前髪 / 分け目 / 長さ / レイヤー構造 / シルエット / 毛流れ / カール / 毛先 / ボリューム / 左右バランス / 顔周りの毛 / 髪色 / 質感
 
 ーーーーーーーーーーーーーー
 色制御分離ルール（最重要）
@@ -202,11 +204,11 @@ def generate_with_images(
 ) -> bytes:
     # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
     images = [_img_file("hairstyle.jpg", hair_bytes)]
-    labels = ["Image 1 = Hairstyle reference (MOST IMPORTANT — reproduce exactly)."]
+    labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
     idx = 2
     if face_bytes:
         images.append(_img_file("face.jpg", face_bytes))
-        labels.append(f"Image {idx} = Face reference (internal use only).")
+        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
         idx += 1
     if outfit_bytes:
         images.append(_img_file("outfit.jpg", outfit_bytes))
