@@ -218,13 +218,14 @@ def generate_with_images(
 
     prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
 
+    # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
+    # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
     result = client.images.edit(
-        model="gpt-image-1",
+        model="gpt-image-2",
         image=images,
         prompt=prompt,
         size="1024x1536",
         quality="high",
-        input_fidelity="high",
     )
 
     b64 = result.data[0].b64_json
