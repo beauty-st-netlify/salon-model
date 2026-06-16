@@ -181,7 +181,6 @@ Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わ
 検証・再生成ルール（最重要）
 ーーーーーーーーーーーーーー
 以下を確認：髪型崩れ / 前髪ズレ / 髪色ズレ / 服色ズレ / 服装デザイン崩れ / 色補正 / 解像度低下 / 手が顔周りにある / バッグや小物
-顔チェック（最重要）：出力の顔がヘアスタイル画像(Image1)の人物に似ていたら不正解。顔は必ず顔画像(Image2)の人物にすること。Image1からは髪だけ使い顔は使わない。Image2の髪は使わない。
 1つでも該当：無効 → 再生成。完全一致まで繰り返す。
 
 ーーーーーーーーーーーーーー
@@ -190,87 +189,11 @@ Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わ
 最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。記号禁止。"""
 
 
-CANVAS_W, CANVAS_H = 1024, 1536
-
-
-def _img_file(name: str, img_bytes: bytes, mime: str = "image/jpeg"):
+def _img_file(name: str, img_bytes: bytes):
     """OpenAI Images API に渡す file タプル (filename, データ, MIME)。"""
     bio = io.BytesIO(img_bytes)
     bio.name = name
-    return (name, bio, mime)
-
-
-def _fit_canvas(img_bytes: bytes, w: int = CANVAS_W, h: int = CANVAS_H) -> bytes:
-    """画像を w×h のポートレートキャンバスにカバー配置（中央クロップ）してPNGで返す。"""
-    from PIL import Image
-
-    im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    sw, sh = im.size
-    scale = max(w / sw, h / sh)
-    nw, nh = max(w, int(sw * scale)), max(h, int(sh * scale))
-    im = im.resize((nw, nh))
-    left, top = (nw - w) // 2, (nh - h) // 2
-    im = im.crop((left, top, left + w, top + h))
-    out = io.BytesIO()
-    im.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _face_bbox_fractions(face_png: bytes):
-    """gpt-4o vision で主要な顔のバウンディングボックスを 0〜1 の割合で取得する。"""
-    import json as _json
-    import re
-
-    resp = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{to_b64(face_png)}"}},
-                {"type": "text", "text": (
-                    "Return ONLY a compact JSON object with the bounding box of the main human "
-                    "face (skin area, not hair) as fractions of image size: "
-                    '{"x0":left,"y0":top,"x1":right,"y1":bottom} each 0..1. No other text.'
-                )},
-            ],
-        }],
-        max_tokens=80,
-    )
-    txt = resp.choices[0].message.content or ""
-    m = re.search(r"\{.*\}", txt, re.S)
-    d = _json.loads(m.group(0))
-    return float(d["x0"]), float(d["y0"]), float(d["x1"]), float(d["y1"])
-
-
-def _build_face_mask(bbox, w: int = CANVAS_W, h: int = CANVAS_H) -> bytes:
-    """顔領域だけ不透明（保持）・それ以外を透明（再生成）のマスクPNGを作る。"""
-    from PIL import Image, ImageDraw
-
-    x0, y0, x1, y1 = bbox
-    px0, py0, px1, py1 = int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)
-    ew, eh = (px1 - px0) * 0.12, (py1 - py0) * 0.12
-    mask = Image.new("RGBA", (w, h), (0, 0, 0, 0))  # 全面透明＝再生成
-    ImageDraw.Draw(mask).ellipse(
-        (px0 - ew, py0 - eh, px1 + ew, py1 + eh), fill=(255, 255, 255, 255)  # 顔だけ不透明＝保持
-    )
-    out = io.BytesIO()
-    mask.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _prepare_face_base_and_mask(face_bytes: bytes):
-    """顔写真をキャンバスに整え、顔保持マスクを作る。3パターン共通なのでセッションにキャッシュ。"""
-    import hashlib
-
-    key = hashlib.md5(face_bytes).hexdigest()
-    cache = st.session_state.get("_face_base_mask")
-    if cache and cache[0] == key:
-        return cache[1], cache[2]
-    base = _fit_canvas(face_bytes)
-    bbox = _face_bbox_fractions(base)
-    mask = _build_face_mask(bbox)
-    st.session_state["_face_base_mask"] = (key, base, mask)
-    return base, mask
+    return (name, bio, "image/jpeg")
 
 
 def generate_with_images(
@@ -279,53 +202,33 @@ def generate_with_images(
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
 ) -> bytes:
-    # 顔画像がある場合：顔写真をベースにし、顔領域をマスクで保持したまま
-    # 「髪・服・背景」だけを再生成する（顔は元写真のピクセル＝確実に本人）。
+    # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
+    images = [_img_file("hairstyle.jpg", hair_bytes)]
+    labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
+    idx = 2
     if face_bytes:
-        base, mask = _prepare_face_base_and_mask(face_bytes)
-        images = [_img_file("base_face.png", base, "image/png"), _img_file("hairstyle.jpg", hair_bytes)]
-        labels = [
-            "Base image = the person's face photo. The masked (preserved) area is the FACE — keep it unchanged.",
-            "Regenerate only the NON-face area. Apply the hairstyle from the hairstyle reference image with exact fidelity (style, color, length, bangs).",
-        ]
-        if outfit_bytes:
-            images.append(_img_file("outfit.jpg", outfit_bytes))
-            labels.append("Outfit reference: apply this clothing (no bags/accessories).")
-        if bg_bytes:
-            images.append(_img_file("background.jpg", bg_bytes))
-            labels.append("Background reference: apply this background.")
-        labels.append("Output: bust-up portrait. The face must remain the base person; do NOT alter facial identity.")
+        images.append(_img_file("face.jpg", face_bytes))
+        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
+        idx += 1
+    if outfit_bytes:
+        images.append(_img_file("outfit.jpg", outfit_bytes))
+        labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
+        idx += 1
+    if bg_bytes:
+        images.append(_img_file("background.jpg", bg_bytes))
+        labels.append(f"Image {idx} = Background reference.")
 
-        prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
-        result = client.images.edit(
-            model="gpt-image-2",
-            image=images,
-            mask=_img_file("mask.png", mask, "image/png"),
-            prompt=prompt,
-            size=f"{CANVAS_W}x{CANVAS_H}",
-            quality="high",
-        )
-    else:
-        # 顔画像なし：従来どおりヘアスタイル画像をベースに合成（顔は固定できない）。
-        images = [_img_file("hairstyle.jpg", hair_bytes)]
-        labels = ["Image 1 = Hairstyle reference — reproduce the hair exactly (style/color/shape/length)."]
-        idx = 2
-        if outfit_bytes:
-            images.append(_img_file("outfit.jpg", outfit_bytes))
-            labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
-            idx += 1
-        if bg_bytes:
-            images.append(_img_file("background.jpg", bg_bytes))
-            labels.append(f"Image {idx} = Background reference.")
+    prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
 
-        prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
-        result = client.images.edit(
-            model="gpt-image-2",
-            image=images,
-            prompt=prompt,
-            size=f"{CANVAS_W}x{CANVAS_H}",
-            quality="high",
-        )
+    # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
+    # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
+    result = client.images.edit(
+        model="gpt-image-2",
+        image=images,
+        prompt=prompt,
+        size="1024x1536",
+        quality="high",
+    )
 
     b64 = result.data[0].b64_json
     if not b64:
