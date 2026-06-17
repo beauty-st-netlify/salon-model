@@ -22,7 +22,6 @@ for key, val in [
 
 FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 3
-MAX_FACE_RETRIES = 2  # 顔が顔画像と一致しない時に作り直す上限回数（0でリトライ無効）
 
 try:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -237,45 +236,6 @@ def generate_with_images(
     return base64.b64decode(b64)
 
 
-def face_matches(generated_bytes: bytes, face_ref_bytes: bytes) -> bool:
-    """生成画像の顔が顔画像(参照)と同一人物か gpt-4o vision で判定。判定不能時は True。"""
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": (
-                        "Image A is a generated portrait. Image B is a reference face photo. "
-                        "Do A and B show the SAME person (same facial identity)? "
-                        "Answer with only 'yes' or 'no'."
-                    )},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{to_b64(generated_bytes)}"}},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{to_b64(face_ref_bytes)}"}},
-                ],
-            }],
-            max_tokens=5,
-        )
-        ans = (resp.choices[0].message.content or "").strip().lower()
-        return ans.startswith("y")
-    except Exception:
-        return True  # 判定に失敗したら余計なリトライをしない（安全側）
-
-
-def generate_matching_face(hair_bytes, face_bytes, outfit_bytes, bg_bytes, status=None, label=""):
-    """生成し、顔が顔画像と一致するまで最大 MAX_FACE_RETRIES 回まで作り直す。"""
-    img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes)
-    if not face_bytes:
-        return img
-    attempt = 0
-    while attempt < MAX_FACE_RETRIES and not face_matches(img, face_bytes):
-        attempt += 1
-        if status is not None:
-            status.info(f"{label}顔が顔画像と一致しないため再生成中…（{attempt}/{MAX_FACE_RETRIES}）")
-        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes)
-    return img
-
-
 def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
     try:
         from googleapiclient.discovery import build
@@ -409,13 +369,11 @@ elif step == 4:
                 status.info(f"パターン {i+1} / {NUM_PATTERNS} を生成中...（1〜2分かかります）")
                 progress.progress(int((i / NUM_PATTERNS) * 90))
 
-                img = generate_matching_face(
+                img = generate_with_images(
                     st.session_state.hair_img,
                     st.session_state.face_img,
                     st.session_state.outfit_img,
                     st.session_state.bg_img,
-                    status=status,
-                    label=f"パターン {i+1}：",
                 )
                 results.append(img)
 
