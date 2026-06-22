@@ -1,10 +1,11 @@
 import streamlit as st
-import openai
 import base64
 import datetime
 import json
 import io
 import requests
+from google import genai
+from google.genai import types
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
@@ -24,9 +25,9 @@ FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 3
 
 try:
-    client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception:
-    st.error("OpenAI APIキーが設定されていません。Streamlit Cloud の Secrets に OPENAI_API_KEY を追加してください。")
+    st.error("Gemini APIキーが設定されていません。Streamlit Cloud の Secrets に GEMINI_API_KEY を追加してください。")
     st.stop()
 
 
@@ -189,11 +190,7 @@ Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わ
 最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。記号禁止。"""
 
 
-def _img_file(name: str, img_bytes: bytes):
-    """OpenAI Images API に渡す file タプル (filename, データ, MIME)。"""
-    bio = io.BytesIO(img_bytes)
-    bio.name = name
-    return (name, bio, "image/jpeg")
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 
 
 def generate_with_images(
@@ -202,38 +199,52 @@ def generate_with_images(
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
 ) -> bytes:
-    # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
-    images = [_img_file("hairstyle.jpg", hair_bytes)]
-    labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
+    # Gemini 2.5 Flash Image（通称 nano-banana）で複数参照を1枚に合成する。
+    # 複数の参照画像を渡しての合成＋人物の同一性維持が得意なモデル。
+    image_inputs = [
+        ("画像1", hair_bytes, "ヘアスタイル参照。髪（形・髪型・髪色・長さ・前髪・分け目・毛流れ・毛先）だけをここから採用する。この画像の顔・人物は出力に一切使わない。"),
+    ]
     idx = 2
     if face_bytes:
-        images.append(_img_file("face.jpg", face_bytes))
-        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
+        image_inputs.append((f"画像{idx}", face_bytes, "顔参照。出力人物の顔・顔立ち・肌・同一性は必ずこの人物にする。この画像の髪・服・背景は使わない（顔だけ使う）。"))
         idx += 1
     if outfit_bytes:
-        images.append(_img_file("outfit.jpg", outfit_bytes))
-        labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
+        image_inputs.append((f"画像{idx}", outfit_bytes, "服装参照。服のみ採用（バッグ・小物・アクセサリーは除去）。服の色を完全維持する。"))
         idx += 1
     if bg_bytes:
-        images.append(_img_file("background.jpg", bg_bytes))
-        labels.append(f"Image {idx} = Background reference.")
+        image_inputs.append((f"画像{idx}", bg_bytes, "背景参照。"))
 
-    prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
-
-    # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
-    # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
-    result = client.images.edit(
-        model="gpt-image-2",
-        image=images,
-        prompt=prompt,
-        size="1024x1536",
-        quality="high",
+    label_text = "\n".join(f"{name} = {desc}" for name, _, desc in image_inputs)
+    prompt = (
+        SYSTEM_INSTRUCTION
+        + "\n\nーーーーーーーーーーーーーー\n入力画像の割り当て\nーーーーーーーーーーーーーー\n"
+        + label_text
+        + "\n\n上記ルールに厳密に従い、髪は画像1から、顔は顔参照画像の人物で、1枚の人物画像を生成すること。出力は画像のみ。"
     )
 
-    b64 = result.data[0].b64_json
-    if not b64:
-        raise Exception("画像が生成されませんでした。もう一度お試しください。")
-    return base64.b64decode(b64)
+    contents = [prompt]
+    for _name, b, _desc in image_inputs:
+        contents.append(types.Part.from_bytes(data=b, mime_type="image/jpeg"))
+
+    # 縦長ポートレート（2:3）で生成。SDK 版差異に備えて config 無しにフォールバック。
+    try:
+        config = types.GenerateContentConfig(
+            image_config=types.ImageConfig(aspect_ratio="2:3"),
+        )
+        resp = gemini_client.models.generate_content(
+            model=GEMINI_IMAGE_MODEL, contents=contents, config=config,
+        )
+    except Exception:
+        resp = gemini_client.models.generate_content(
+            model=GEMINI_IMAGE_MODEL, contents=contents,
+        )
+
+    for cand in (resp.candidates or []):
+        for part in (cand.content.parts or []):
+            inline = getattr(part, "inline_data", None)
+            if inline and inline.data:
+                return inline.data
+    raise Exception("画像が生成されませんでした。もう一度お試しください。")
 
 
 def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
