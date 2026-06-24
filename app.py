@@ -4,6 +4,7 @@ import base64
 import datetime
 import json
 import io
+import time
 import requests
 import concurrent.futures
 import threading
@@ -23,11 +24,11 @@ for key, val in [
         st.session_state[key] = val
 
 FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
-NUM_PATTERNS = 3
+NUM_PATTERNS = 2
 
 # 顔の類似度による自動リトライ設定
 MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
-FACE_SIM_THRESHOLD = 0.363    # SFaceのコサイン類似度。これ未満=別人とみなして作り直す
+FACE_SIM_THRESHOLD = 0.42     # SFaceのコサイン類似度。これ未満=別人とみなして作り直す（高いほど厳しい。標準0.363）
 _face_lock = threading.Lock() # 顔モデルを複数スレッドから安全に使うためのロック
 
 try:
@@ -354,7 +355,7 @@ def generate_with_images(
         image=images,
         prompt=prompt,
         size="1024x1536",
-        quality="high",
+        quality="medium",
     )
 
     b64 = result.data[0].b64_json
@@ -489,7 +490,12 @@ elif step == 4:
 
         progress = st.progress(0)
         status = st.empty()
-        status.info(f"{NUM_PATTERNS}パターンを並列生成中...（1〜2分ほどで完了します）")
+        status.info(f"{NUM_PATTERNS}パターンを並列生成中...（目安1〜2分・できた順に下へ表示します）")
+
+        # できた順に表示するためのプレビュー枠
+        preview_cols = st.columns(NUM_PATTERNS)
+        placeholders = [c.empty() for c in preview_cols]
+        start_time = time.time()
 
         try:
             # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
@@ -519,8 +525,11 @@ elif step == 4:
                     i = future_to_idx[fut]
                     results[i] = fut.result()
                     done += 1
+                    # できた順にその場で表示
+                    placeholders[i].image(results[i], caption=f"パターン{i+1}", use_container_width=True)
                     progress.progress(int((done / NUM_PATTERNS) * 100))
-                    status.info(f"{done} / {NUM_PATTERNS} パターン完了")
+                    elapsed = int(time.time() - start_time)
+                    status.info(f"{done} / {NUM_PATTERNS} パターン完了（経過 {elapsed} 秒）")
 
             # Drive保存（メインスレッドでまとめて）
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
