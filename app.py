@@ -26,6 +26,10 @@ for key, val in [
 FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 2
 
+# テスト用の合計生成回数の上限（全ユーザー共通・Drive上に永続保存）
+USAGE_LIMIT = 3
+USAGE_FILE_NAME = "_usage_count.json"
+
 # 顔の類似度による自動リトライ設定
 MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
 FACE_SIM_THRESHOLD = 0.42     # SFaceのコサイン類似度。これ未満=別人とみなして作り直す（高いほど厳しい。標準0.363）
@@ -385,9 +389,70 @@ def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
         return None
 
 
+# ---------- テスト用の利用回数カウンタ（Drive上に永続保存） ----------
+
+def _drive_service():
+    from googleapiclient.discovery import build
+    from google.oauth2 import service_account
+
+    creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    return build("drive", "v3", credentials=creds)
+
+
+def get_usage():
+    """(count, file_id, service) を返す。Drive障害時は (None, None, None) でフェイルオープン。"""
+    try:
+        service = _drive_service()
+        q = f"name='{USAGE_FILE_NAME}' and '{FOLDER_ID}' in parents and trashed=false"
+        res = service.files().list(q=q, fields="files(id)").execute()
+        files = res.get("files", [])
+        if not files:
+            return 0, None, service
+        fid = files[0]["id"]
+        data = service.files().get_media(fileId=fid).execute()
+        count = int(json.loads(data.decode()).get("count", 0))
+        return count, fid, service
+    except Exception:
+        return None, None, None
+
+
+def set_usage(service, file_id, count):
+    """カウンタを書き込む。失敗しても例外は飲み込む。"""
+    try:
+        from googleapiclient.http import MediaInMemoryUpload
+
+        body = json.dumps({"count": count}).encode()
+        media = MediaInMemoryUpload(body, mimetype="application/json")
+        if file_id is None:
+            meta = {"name": USAGE_FILE_NAME, "parents": [FOLDER_ID]}
+            f = service.files().create(body=meta, media_body=media, fields="id").execute()
+            return f.get("id")
+        service.files().update(fileId=file_id, media_body=media).execute()
+        return file_id
+    except Exception:
+        return file_id
+
+
 # ---------- UI ----------
 
 st.title("✂️ サロンモデル化くん")
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _remaining_display():
+    c, _, _ = get_usage()
+    if c is None:
+        return None
+    return max(USAGE_LIMIT - c, 0)
+
+
+_rem = _remaining_display()
+if _rem is not None:
+    st.caption(f"🧪 テスト残り生成回数: {_rem} / {USAGE_LIMIT}")
 
 STEPS = ["①ヘアスタイル", "②顔", "③服装", "④背景", "⑤生成"]
 step = st.session_state.step
@@ -486,6 +551,12 @@ elif step == 3:
 # ===== STEP 4: 生成 =====
 elif step == 4:
     if st.session_state.result_imgs is None:
+        # テスト用の合計回数チェック（全ユーザー共通・Drive永続）
+        usage_count, usage_fid, usage_service = get_usage()
+        if usage_count is not None and usage_count >= USAGE_LIMIT:
+            st.error(f"🚫 テスト用の生成回数の上限（合計 {USAGE_LIMIT} 回）に達しました。ご利用ありがとうございました。")
+            st.stop()
+
         st.subheader(f"⚙️ {NUM_PATTERNS}パターンを同時生成中...")
 
         progress = st.progress(0)
@@ -496,6 +567,10 @@ elif step == 4:
         preview_cols = st.columns(NUM_PATTERNS)
         placeholders = [c.empty() for c in preview_cols]
         start_time = time.time()
+
+        # この生成を1回ぶん消費（多重起動・リロードでの超過を防ぐため生成前に記録）
+        if usage_count is not None:
+            usage_fid = set_usage(usage_service, usage_fid, usage_count + 1)
 
         try:
             # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
@@ -540,6 +615,9 @@ elif step == 4:
             st.rerun()
 
         except Exception as e:
+            # 生成失敗時は消費した1回ぶんを戻す
+            if usage_count is not None:
+                set_usage(usage_service, usage_fid, usage_count)
             st.error(f"エラーが発生しました: {e}")
             if st.button("最初からやり直す"):
                 for k in list(st.session_state.keys()):
