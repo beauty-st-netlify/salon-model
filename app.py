@@ -5,6 +5,7 @@ import datetime
 import json
 import io
 import requests
+import concurrent.futures
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
@@ -358,31 +359,38 @@ elif step == 3:
 # ===== STEP 4: 生成 =====
 elif step == 4:
     if st.session_state.result_imgs is None:
-        st.subheader(f"⚙️ {NUM_PATTERNS}パターン生成中...")
+        st.subheader(f"⚙️ {NUM_PATTERNS}パターンを同時生成中...")
 
         progress = st.progress(0)
         status = st.empty()
-        results = []
+        status.info(f"{NUM_PATTERNS}パターンを並列生成中...（1〜2分ほどで完了します）")
 
         try:
-            for i in range(NUM_PATTERNS):
-                status.info(f"パターン {i+1} / {NUM_PATTERNS} を生成中...（1〜2分かかります）")
-                progress.progress(int((i / NUM_PATTERNS) * 90))
+            args = (
+                st.session_state.hair_img,
+                st.session_state.face_img,
+                st.session_state.outfit_img,
+                st.session_state.bg_img,
+            )
 
-                img = generate_with_images(
-                    st.session_state.hair_img,
-                    st.session_state.face_img,
-                    st.session_state.outfit_img,
-                    st.session_state.bg_img,
-                )
-                results.append(img)
+            # 3パターンを同時並行で生成（順次だと枚数分の時間がかかるため）。
+            results = [None] * NUM_PATTERNS
+            with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_PATTERNS) as ex:
+                future_to_idx = {ex.submit(generate_with_images, *args): i for i in range(NUM_PATTERNS)}
+                done = 0
+                for fut in concurrent.futures.as_completed(future_to_idx):
+                    i = future_to_idx[fut]
+                    results[i] = fut.result()
+                    done += 1
+                    progress.progress(int((done / NUM_PATTERNS) * 100))
+                    status.info(f"{done} / {NUM_PATTERNS} パターン完了")
 
-                # Drive保存
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Drive保存（メインスレッドでまとめて）
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            for i, img in enumerate(results):
                 save_to_drive(img, f"サロンモデル_{ts}_パターン{i+1}.png")
 
             st.session_state.result_imgs = results
-            progress.progress(100)
             st.rerun()
 
         except Exception as e:
