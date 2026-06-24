@@ -6,6 +6,7 @@ import json
 import io
 import requests
 import concurrent.futures
+import threading
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
@@ -23,6 +24,11 @@ for key, val in [
 
 FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 3
+
+# 顔の類似度による自動リトライ設定
+MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
+FACE_SIM_THRESHOLD = 0.363    # SFaceのコサイン類似度。これ未満=別人とみなして作り直す
+_face_lock = threading.Lock() # 顔モデルを複数スレッドから安全に使うためのロック
 
 try:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -240,6 +246,83 @@ def blur_hairstyle_face(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+@st.cache_resource(show_spinner=False)
+def _load_face_models():
+    """OpenCV の顔検出(YuNet)・顔認識(SFace)モデルを読み込む。
+
+    モデルは OpenCV Zoo から初回のみダウンロードして一時領域にキャッシュする。
+    追加の pip 依存は不要（opencv-python-headless に同梱の API を使う）。
+    """
+    import cv2
+    import os
+    import tempfile
+    import urllib.request
+
+    base = tempfile.gettempdir()
+    det_path = os.path.join(base, "face_detection_yunet_2023mar.onnx")
+    rec_path = os.path.join(base, "face_recognition_sface_2021dec.onnx")
+    det_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+    rec_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+    if not os.path.exists(det_path):
+        urllib.request.urlretrieve(det_url, det_path)
+    if not os.path.exists(rec_path):
+        urllib.request.urlretrieve(rec_url, rec_path)
+
+    detector = cv2.FaceDetectorYN.create(det_path, "", (320, 320), 0.9, 0.3, 5000)
+    recognizer = cv2.FaceRecognizerSF.create(rec_path, "")
+    return detector, recognizer
+
+
+def face_feature(img_bytes: bytes):
+    """画像から最大の顔の特徴量ベクトルを取り出す。顔が無い/失敗時は None。"""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        detector, recognizer = _load_face_models()
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+        h, w = bgr.shape[:2]
+        detector.setInputSize((w, h))
+        _, faces = detector.detect(bgr)
+        if faces is None or len(faces) == 0:
+            return None
+        face = max(faces, key=lambda f: f[2] * f[3])  # 一番大きい顔
+        aligned = recognizer.alignCrop(bgr, face)
+        return recognizer.feature(aligned)
+    except Exception:
+        return None
+
+
+def face_similarity(feat_a, feat_b) -> float:
+    """2つの顔特徴量のコサイン類似度（高いほど同一人物）。失敗時は -1。"""
+    try:
+        import cv2
+
+        _, recognizer = _load_face_models()
+        cosine_flag = getattr(cv2, "FaceRecognizerSF_FR_COSINE", 0)
+        return float(recognizer.match(feat_a, feat_b, cosine_flag))
+    except Exception:
+        return -1.0
+
+
+def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat):
+    """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。"""
+    last = None
+    for _attempt in range(MAX_FACE_RETRIES + 1):
+        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes)
+        last = img
+        if target_feat is None:
+            return img  # 顔参照なし or 顔特徴が取れない → 判定せず採用
+        with _face_lock:
+            feat = face_feature(img)
+            sim = face_similarity(target_feat, feat) if feat is not None else 1.0
+        if feat is None or sim >= FACE_SIM_THRESHOLD:
+            return img  # 一致 or 判定不能 → 採用
+    return last  # 上限まで作り直しても不一致なら最後の1枚を返す
+
+
 def generate_with_images(
     hair_bytes: bytes,
     face_bytes: bytes | None,
@@ -412,20 +495,25 @@ elif step == 4:
             # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
             # （モデルがヘア画像の顔をコピーして顔がブレるのを防ぐ）。1回だけ処理。
             hair_for_gen = st.session_state.hair_img
+            target_feat = None
             if st.session_state.face_img:
                 hair_for_gen = blur_hairstyle_face(st.session_state.hair_img)
+                # アップ顔の特徴量を1回だけ算出（メインスレッドでモデルを温める）
+                target_feat = face_feature(st.session_state.face_img)
 
             args = (
                 hair_for_gen,
                 st.session_state.face_img,
                 st.session_state.outfit_img,
                 st.session_state.bg_img,
+                target_feat,
             )
 
             # 3パターンを同時並行で生成（順次だと枚数分の時間がかかるため）。
+            # 各パターンは顔が一致するまで自動リトライ（generate_pattern内）。
             results = [None] * NUM_PATTERNS
             with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_PATTERNS) as ex:
-                future_to_idx = {ex.submit(generate_with_images, *args): i for i in range(NUM_PATTERNS)}
+                future_to_idx = {ex.submit(generate_pattern, *args): i for i in range(NUM_PATTERNS)}
                 done = 0
                 for fut in concurrent.futures.as_completed(future_to_idx):
                     i = future_to_idx[fut]
