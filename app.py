@@ -197,6 +197,49 @@ def _img_file(name: str, img_bytes: bytes):
     return (name, bio, "image/jpeg")
 
 
+def blur_hairstyle_face(img_bytes: bytes) -> bytes:
+    """ヘアスタイル画像の顔だけを強くぼかす。
+
+    モデルが「ヘアスタイル画像の顔」をそのままコピーして顔がブレるのを防ぐ目的。
+    髪（顔周りの毛を含む）はそのまま残すため、検出した顔 boxを少し内側に縮めてぼかす。
+    顔検出に失敗した場合は原本をそのまま返す（無害なフォールバック）。
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageFilter
+
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr = np.array(pil)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        if len(faces) == 0:
+            return img_bytes
+
+        # 一番大きい顔（＝メインの人物）を対象にする
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        # 顔周りの毛・輪郭を残すため box を1割内側に縮める
+        pad_x, pad_y = int(w * 0.1), int(h * 0.1)
+        box = (
+            max(x + pad_x, 0),
+            max(y + pad_y, 0),
+            min(x + w - pad_x, pil.width),
+            min(y + h - pad_y, pil.height),
+        )
+        region = pil.crop(box).filter(ImageFilter.GaussianBlur(radius=max(8, max(w, h) // 6)))
+        pil.paste(region, box)
+
+        out = io.BytesIO()
+        pil.save(out, format="JPEG", quality=95)
+        return out.getvalue()
+    except Exception:
+        # OpenCV未導入・検出失敗などは原本にフォールバック
+        return img_bytes
+
+
 def generate_with_images(
     hair_bytes: bytes,
     face_bytes: bytes | None,
@@ -366,8 +409,14 @@ elif step == 4:
         status.info(f"{NUM_PATTERNS}パターンを並列生成中...（1〜2分ほどで完了します）")
 
         try:
+            # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
+            # （モデルがヘア画像の顔をコピーして顔がブレるのを防ぐ）。1回だけ処理。
+            hair_for_gen = st.session_state.hair_img
+            if st.session_state.face_img:
+                hair_for_gen = blur_hairstyle_face(st.session_state.hair_img)
+
             args = (
-                st.session_state.hair_img,
+                hair_for_gen,
                 st.session_state.face_img,
                 st.session_state.outfit_img,
                 st.session_state.bg_img,
