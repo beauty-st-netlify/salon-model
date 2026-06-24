@@ -201,11 +201,39 @@ Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わ
 最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。記号禁止。"""
 
 
+def normalize_for_api(img_bytes: bytes, max_side: int = 2048) -> bytes:
+    """アップ画像を gpt-image edit API が確実に受け付ける形に正規化する。
+
+    スマホ画像などで RGBA / CMYK / パレット等のモードや特殊形式だと
+    「Invalid image file or mode」で弾かれるため、必ず RGB の PNG に変換し、
+    長辺が大きすぎる場合は縮小する。失敗時は原本を返す。
+    """
+    try:
+        from PIL import Image
+
+        pil = Image.open(io.BytesIO(img_bytes))
+        pil = pil.convert("RGB")
+        w, h = pil.size
+        scale = min(1.0, max_side / max(w, h))
+        if scale < 1.0:
+            pil = pil.resize((max(int(w * scale), 1), max(int(h * scale), 1)))
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 def _img_file(name: str, img_bytes: bytes):
-    """OpenAI Images API に渡す file タプル (filename, データ, MIME)。"""
-    bio = io.BytesIO(img_bytes)
-    bio.name = name
-    return (name, bio, "image/jpeg")
+    """OpenAI Images API に渡す file タプル (filename, データ, MIME)。
+
+    全画像を RGB PNG に正規化してから渡す（モード/形式不正での 400 を防ぐ）。
+    """
+    clean = normalize_for_api(img_bytes)
+    png_name = name.rsplit(".", 1)[0] + ".png"
+    bio = io.BytesIO(clean)
+    bio.name = png_name
+    return (png_name, bio, "image/png")
 
 
 def blur_hairstyle_face(img_bytes: bytes) -> bytes:
