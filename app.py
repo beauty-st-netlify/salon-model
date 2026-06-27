@@ -482,6 +482,29 @@ _rem = _remaining_display()
 if _rem is not None:
     st.caption(f"🧪 テスト残り生成回数: {_rem} / {USAGE_LIMIT}")
 
+# 診断モード：?debug=1 のときだけ Drive カウンタ読み取りの失敗理由を表示する。
+# （カウンタが読めない＝回数制限が効かない状態の原因を特定するため）
+if st.query_params.get("debug") == "1":
+    import traceback
+    st.markdown("#### 🔧 診断 (debug=1)")
+    has_secret = "GOOGLE_CREDENTIALS" in st.secrets
+    st.write(f"GOOGLE_CREDENTIALS secret 設定あり: {has_secret}")
+    try:
+        creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+        st.write(f"service account: {creds_info.get('client_email', '不明')}")
+        service = _drive_service()
+        q = f"name='{USAGE_FILE_NAME}' and '{FOLDER_ID}' in parents and trashed=false"
+        res = service.files().list(q=q, fields="files(id)").execute()
+        files = res.get("files", [])
+        st.write(f"カウンタファイル: {'あり id=' + files[0]['id'] if files else 'なし(=0回)'}")
+        if files:
+            data = service.files().get_media(fileId=files[0]["id"]).execute()
+            st.write(f"中身: {data.decode()}")
+        st.success("Drive 接続 OK")
+    except Exception as e:
+        st.error(f"Drive 接続 NG: {type(e).__name__}: {e}")
+        st.code(traceback.format_exc())
+
 STEPS = ["①ヘアスタイル", "②顔", "③服装", "④背景", "⑤生成"]
 step = st.session_state.step
 cols = st.columns(5)
