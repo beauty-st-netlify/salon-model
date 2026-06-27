@@ -459,28 +459,6 @@ _rem = _remaining_display()
 if _rem is not None:
     st.caption(f"🧪 テスト残り生成回数: {_rem} / {USAGE_LIMIT}")
 
-# 診断モード：?debug=1 のときだけ GitHub カウンタ読み取りの状態を表示する。
-# （カウンタが読めない＝回数制限が効かない状態の原因を特定するため）
-if st.query_params.get("debug") == "1":
-    import traceback
-    st.markdown("#### 🔧 診断 (debug=1)")
-    has_secret = "GITHUB_TOKEN" in st.secrets
-    st.write(f"GITHUB_TOKEN secret 設定あり: {has_secret}")
-    try:
-        count, sha = get_usage()
-        if count is None:
-            st.error("GitHub からカウンタを読めませんでした（トークン未設定 or 権限不足）")
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USAGE_PATH}?ref={USAGE_BRANCH}"
-            r = requests.get(url, headers=_gh_headers(), timeout=15)
-            st.write(f"HTTP status: {r.status_code}")
-            st.code(r.text[:500])
-        else:
-            st.write(f"現在のカウント: {count} / {USAGE_LIMIT}（残り {max(USAGE_LIMIT - count, 0)}）")
-            st.success("GitHub 接続 OK")
-    except Exception as e:
-        st.error(f"GitHub 接続 NG: {type(e).__name__}: {e}")
-        st.code(traceback.format_exc())
-
 STEPS = ["①ヘアスタイル", "②顔", "③服装", "④背景", "⑤生成"]
 step = st.session_state.step
 cols = st.columns(5)
