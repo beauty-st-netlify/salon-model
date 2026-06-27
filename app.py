@@ -670,12 +670,49 @@ elif step == 4:
             st.markdown("")
 
         st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 同じ素材で再生成", use_container_width=True):
+        st.markdown("### ♻️ 素材を差し替えて次を作成")
+        st.caption("変えたい画像だけ差し替えてください。差し替えないものは前回のまま使います（例：顔・服・背景は固定でヘアだけ変える）。")
+
+        # (session_stateキー, ラベル, 必須かどうか)
+        slots = [
+            ("hair_img", "💇 ヘアスタイル", True),
+            ("face_img", "👤 顔", False),
+            ("outfit_img", "👗 服装", False),
+            ("bg_img", "🏞️ 背景", False),
+        ]
+        edit_cols = st.columns(4)
+        for (key, label, required), col in zip(slots, edit_cols):
+            with col:
+                st.markdown(f"**{label}**" if required else f"**{label}**<br><small>（省略可）</small>", unsafe_allow_html=True)
+                cur = st.session_state.get(key)
+                if cur:
+                    st.image(cur, use_container_width=True)
+                else:
+                    st.caption("（なし）")
+                up = st.file_uploader(
+                    "差し替え", type=["jpg", "jpeg", "png"],
+                    key=f"re_{key}", label_visibility="collapsed",
+                )
+                if up is not None:
+                    st.image(up, caption="↑ 差し替え後", use_container_width=True)
+                # 任意素材は「なしにする」も可能に
+                if not required and cur is not None:
+                    if st.button("削除", key=f"del_{key}", use_container_width=True):
+                        st.session_state[key] = None
+                        st.rerun()
+
+        st.markdown("")
+        gen_col1, gen_col2 = st.columns(2)
+        with gen_col1:
+            if st.button("✨ この内容で生成", type="primary", use_container_width=True):
+                # 差し替えがあったスロットだけ session に反映（getvalueは非破壊で複数回押しても安全）
+                for key, _label, _required in slots:
+                    up = st.session_state.get(f"re_{key}")
+                    if up is not None:
+                        st.session_state[key] = up.getvalue()
                 st.session_state.result_imgs = None
                 st.rerun()
-        with col2:
+        with gen_col2:
             if st.button("🆕 最初からやり直す", use_container_width=True):
                 for k in list(st.session_state.keys()):
                     del st.session_state[k]
