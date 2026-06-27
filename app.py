@@ -23,12 +23,15 @@ for key, val in [
     if key not in st.session_state:
         st.session_state[key] = val
 
-FOLDER_ID = "1JxCpIuHzIQZDjuQt5UG8KyOqdkbTYLPt"
 NUM_PATTERNS = 2
 
-# テスト用の合計生成回数の上限（全ユーザー共通・Drive上に永続保存）
+# テスト用の合計生成回数の上限（全ユーザー共通）。
+# カウンタは GitHub リポジトリの専用ブランチ usage-data 上の usage_count.json に永続保存する
+# （main とは別ブランチなので、書き込んでもアプリの再デプロイは発生しない）。
 USAGE_LIMIT = 3
-USAGE_FILE_NAME = "_usage_count.json"
+GITHUB_REPO = "beauty-st-netlify/salon-model"
+USAGE_BRANCH = "usage-data"
+USAGE_PATH = "usage_count.json"
 
 # 顔の類似度による自動リトライ設定
 MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
@@ -396,73 +399,47 @@ def generate_with_images(
     return base64.b64decode(b64)
 
 
-def save_to_drive(image_bytes: bytes, filename: str) -> str | None:
-    try:
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaInMemoryUpload
-        from google.oauth2 import service_account
+# ---------- テスト用の利用回数カウンタ（GitHub リポジトリに永続保存） ----------
+# GitHub Contents API を使い、usage-data ブランチの usage_count.json を読み書きする。
+# Secrets に GITHUB_TOKEN（このリポジトリへの contents 書き込み権限）が必要。
 
-        creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-        creds = service_account.Credentials.from_service_account_info(
-            creds_info,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        service = build("drive", "v3", credentials=creds)
-        meta = {"name": filename, "parents": [FOLDER_ID]}
-        media = MediaInMemoryUpload(image_bytes, mimetype="image/png")
-        f = service.files().create(body=meta, media_body=media, fields="id,webViewLink").execute()
-        return f.get("webViewLink")
-    except Exception as e:
-        st.warning(f"Drive保存をスキップしました: {e}")
-        return None
-
-
-# ---------- テスト用の利用回数カウンタ（Drive上に永続保存） ----------
-
-def _drive_service():
-    from googleapiclient.discovery import build
-    from google.oauth2 import service_account
-
-    creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-    creds = service_account.Credentials.from_service_account_info(
-        creds_info,
-        scopes=["https://www.googleapis.com/auth/drive"],
-    )
-    return build("drive", "v3", credentials=creds)
+def _gh_headers():
+    token = st.secrets["GITHUB_TOKEN"]
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
 
 
 def get_usage():
-    """(count, file_id, service) を返す。Drive障害時は (None, None, None) でフェイルオープン。"""
+    """(count, sha) を返す。読めない時は (None, None) でフェイルオープン。"""
     try:
-        service = _drive_service()
-        q = f"name='{USAGE_FILE_NAME}' and '{FOLDER_ID}' in parents and trashed=false"
-        res = service.files().list(q=q, fields="files(id)").execute()
-        files = res.get("files", [])
-        if not files:
-            return 0, None, service
-        fid = files[0]["id"]
-        data = service.files().get_media(fileId=fid).execute()
-        count = int(json.loads(data.decode()).get("count", 0))
-        return count, fid, service
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USAGE_PATH}?ref={USAGE_BRANCH}"
+        r = requests.get(url, headers=_gh_headers(), timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        content = base64.b64decode(data["content"]).decode()
+        count = int(json.loads(content).get("count", 0))
+        return count, data["sha"]
     except Exception:
-        return None, None, None
+        return None, None
 
 
-def set_usage(service, file_id, count):
-    """カウンタを書き込む。失敗しても例外は飲み込む。"""
+def set_usage(count, sha):
+    """カウンタを書き込み、新しい sha を返す。失敗時は None。"""
     try:
-        from googleapiclient.http import MediaInMemoryUpload
-
-        body = json.dumps({"count": count}).encode()
-        media = MediaInMemoryUpload(body, mimetype="application/json")
-        if file_id is None:
-            meta = {"name": USAGE_FILE_NAME, "parents": [FOLDER_ID]}
-            f = service.files().create(body=meta, media_body=media, fields="id").execute()
-            return f.get("id")
-        service.files().update(fileId=file_id, media_body=media).execute()
-        return file_id
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USAGE_PATH}"
+        body = {
+            "message": f"usage count -> {count}",
+            "content": base64.b64encode(json.dumps({"count": count}).encode()).decode(),
+            "branch": USAGE_BRANCH,
+            "sha": sha,
+        }
+        r = requests.put(url, headers=_gh_headers(), json=body, timeout=15)
+        r.raise_for_status()
+        return r.json()["content"]["sha"]
     except Exception:
-        return file_id
+        return None
 
 
 # ---------- UI ----------
@@ -472,7 +449,7 @@ st.title("✂️ サロンモデル化くん")
 
 @st.cache_data(ttl=15, show_spinner=False)
 def _remaining_display():
-    c, _, _ = get_usage()
+    c, _ = get_usage()
     if c is None:
         return None
     return max(USAGE_LIMIT - c, 0)
@@ -482,27 +459,26 @@ _rem = _remaining_display()
 if _rem is not None:
     st.caption(f"🧪 テスト残り生成回数: {_rem} / {USAGE_LIMIT}")
 
-# 診断モード：?debug=1 のときだけ Drive カウンタ読み取りの失敗理由を表示する。
+# 診断モード：?debug=1 のときだけ GitHub カウンタ読み取りの状態を表示する。
 # （カウンタが読めない＝回数制限が効かない状態の原因を特定するため）
 if st.query_params.get("debug") == "1":
     import traceback
     st.markdown("#### 🔧 診断 (debug=1)")
-    has_secret = "GOOGLE_CREDENTIALS" in st.secrets
-    st.write(f"GOOGLE_CREDENTIALS secret 設定あり: {has_secret}")
+    has_secret = "GITHUB_TOKEN" in st.secrets
+    st.write(f"GITHUB_TOKEN secret 設定あり: {has_secret}")
     try:
-        creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-        st.write(f"service account: {creds_info.get('client_email', '不明')}")
-        service = _drive_service()
-        q = f"name='{USAGE_FILE_NAME}' and '{FOLDER_ID}' in parents and trashed=false"
-        res = service.files().list(q=q, fields="files(id)").execute()
-        files = res.get("files", [])
-        st.write(f"カウンタファイル: {'あり id=' + files[0]['id'] if files else 'なし(=0回)'}")
-        if files:
-            data = service.files().get_media(fileId=files[0]["id"]).execute()
-            st.write(f"中身: {data.decode()}")
-        st.success("Drive 接続 OK")
+        count, sha = get_usage()
+        if count is None:
+            st.error("GitHub からカウンタを読めませんでした（トークン未設定 or 権限不足）")
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USAGE_PATH}?ref={USAGE_BRANCH}"
+            r = requests.get(url, headers=_gh_headers(), timeout=15)
+            st.write(f"HTTP status: {r.status_code}")
+            st.code(r.text[:500])
+        else:
+            st.write(f"現在のカウント: {count} / {USAGE_LIMIT}（残り {max(USAGE_LIMIT - count, 0)}）")
+            st.success("GitHub 接続 OK")
     except Exception as e:
-        st.error(f"Drive 接続 NG: {type(e).__name__}: {e}")
+        st.error(f"GitHub 接続 NG: {type(e).__name__}: {e}")
         st.code(traceback.format_exc())
 
 STEPS = ["①ヘアスタイル", "②顔", "③服装", "④背景", "⑤生成"]
@@ -602,8 +578,8 @@ elif step == 3:
 # ===== STEP 4: 生成 =====
 elif step == 4:
     if st.session_state.result_imgs is None:
-        # テスト用の合計回数チェック（全ユーザー共通・Drive永続）
-        usage_count, usage_fid, usage_service = get_usage()
+        # テスト用の合計回数チェック（全ユーザー共通・GitHub永続）
+        usage_count, usage_sha = get_usage()
         if usage_count is not None and usage_count >= USAGE_LIMIT:
             st.error(f"🚫 テスト用の生成回数の上限（合計 {USAGE_LIMIT} 回）に達しました。ご利用ありがとうございました。")
             st.stop()
@@ -621,7 +597,7 @@ elif step == 4:
 
         # この生成を1回ぶん消費（多重起動・リロードでの超過を防ぐため生成前に記録）
         if usage_count is not None:
-            usage_fid = set_usage(usage_service, usage_fid, usage_count + 1)
+            usage_sha = set_usage(usage_count + 1, usage_sha)
 
         try:
             # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
@@ -657,18 +633,13 @@ elif step == 4:
                     elapsed = int(time.time() - start_time)
                     status.info(f"{done} / {NUM_PATTERNS} パターン完了（経過 {elapsed} 秒）")
 
-            # Drive保存（メインスレッドでまとめて）
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            for i, img in enumerate(results):
-                save_to_drive(img, f"サロンモデル_{ts}_パターン{i+1}.png")
-
             st.session_state.result_imgs = results
             st.rerun()
 
         except Exception as e:
             # 生成失敗時は消費した1回ぶんを戻す
-            if usage_count is not None:
-                set_usage(usage_service, usage_fid, usage_count)
+            if usage_count is not None and usage_sha is not None:
+                set_usage(usage_count, usage_sha)
             st.error(f"エラーが発生しました: {e}")
             if st.button("最初からやり直す"):
                 for k in list(st.session_state.keys()):
