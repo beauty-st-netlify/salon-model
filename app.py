@@ -18,6 +18,7 @@ for key, val in [
     ("face_img", None),
     ("outfit_img", None),
     ("bg_img", None),
+    ("hair_orientation", "自動判定"),  # 自動判定 / 正面・横 / 後ろ姿
     ("result_imgs", None),   # list of 3 images
 ]:
     if key not in st.session_state:
@@ -204,6 +205,67 @@ Image1 からは髪だけを基準とし、Image1 の顔立ちは出力に使わ
 最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。記号禁止。"""
 
 
+# ヘアスタイル画像が「後ろ姿（または横）」のときに使う指示。
+# 後頭部のピクセルを正面に貼ることは不可能なので、巻き・長さ・色・質感などの
+# 「属性」だけを抽出し、それに一致する正面向きヘアを再構成させる（A案）。
+SYSTEM_INSTRUCTION_BACK = """あなたは画像合成専用AIです。
+出力は必ず「正面向き・バストアップ」の1枚の人物画像にする。
+
+ーーーーーーーーーーーーーー
+ヘアスタイルの扱い（最重要・このモード専用）
+ーーーーーーーーーーーーーー
+Image1（ヘアスタイル画像）は人物の【後ろ姿または横向き】の写真である。
+後頭部のピクセルをそのまま正面に貼り付けてはいけない（物理的に不可能）。
+Image1からは次の「属性」だけを抽出する：
+・カールの大きさ / 巻きの強さ・方向 / ウェーブのピッチ
+・長さ / レイヤー構造 / 毛量・ボリューム / 毛先の動き
+・髪色（根元・中間・毛先のグラデーションを含む）/ 質感・ツヤ
+抽出した属性に一致する【正面向きのヘアスタイルを再構成】して出力する。
+前髪・顔まわりの毛は写真に写っていないため、同じパーマ質感・同じ毛束感・同じ髪色で
+自然に補完する（不自然な左右非対称・想定外の前髪割れは避ける）。
+重要：再現すべきは「巻き・長さ・色・質感」であり、後頭部の見た目そのものではない。
+
+ーーーーーーーーーーーーーー
+顔（最重要）
+ーーーーーーーーーーーーーー
+出力の顔・顔立ち・肌・人物の同一性は Image2（顔画像）の人物にする。
+Image2 の髪・服・背景は使わない（顔だけ使う）。
+
+ーーーーーーーーーーーーーー
+髪色（最重要）
+ーーーーーーーーーーーーーー
+髪色は Image1 の色を基準に維持する。根元・中間・毛先のグラデーションを再現する。
+ホワイトバランス/トーン/彩度/明度/コントラスト/背景色への適応 等の色補正は禁止。
+
+ーーーーーーーーーーーーーー
+色制御分離（最重要）
+ーーーーーーーーーーーーーー
+髪色・服色・背景色は独立。互いに影響させない。
+服色は Image3（服画像）の色を完全一致で維持（黒化・彩度低下・トーン統一・色補正の禁止）。
+背景色は Image4（背景画像）に従う。
+
+ーーーーーーーーーーーーーー
+服処理
+ーーーーーーーーーーーーーー
+服のみ抽出。バッグ・カバン・ストラップ・小物・アクセサリーは削除。生成もしない。
+
+ーーーーーーーーーーーーーー
+ポーズ・手
+ーーーーーーーーーーーーーー
+手は空にし、体の横・腰の下・太もも付近に置く。顔周り（顎/頬/口/鼻/目/耳/首）に手を置かない。髪を触らない。
+
+ーーーーーーーーーーーーーー
+構図・画質
+ーーーーーーーーーーーーーー
+正面向き・バストアップ。顔位置を中央上寄りに固定。
+エッジシャープ・細部最大化・ぼかし禁止。
+
+ーーーーーーーーーーーーーー
+出力制御
+ーーーーーーーーーーーーーー
+最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。"""
+
+
 def normalize_for_api(img_bytes: bytes, max_side: int = 2048) -> bytes:
     """アップ画像を gpt-image edit API が確実に受け付ける形に正規化する。
 
@@ -237,6 +299,28 @@ def _img_file(name: str, img_bytes: bytes):
     bio = io.BytesIO(clean)
     bio.name = png_name
     return (png_name, bio, "image/png")
+
+
+def hairstyle_has_face(img_bytes: bytes) -> bool:
+    """ヘアスタイル画像に正面顔が写っているかを判定する。
+
+    顔が検出できない＝後ろ姿/横向きの可能性が高い、という自動判定に使う。
+    検出処理に失敗した場合は安全側に True（=正面扱い・従来動作）を返す。
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        gray = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        return len(faces) > 0
+    except Exception:
+        return True
 
 
 def blur_hairstyle_face(img_bytes: bytes) -> bytes:
@@ -343,11 +427,11 @@ def face_similarity(feat_a, feat_b) -> float:
         return -1.0
 
 
-def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat):
+def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False):
     """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。"""
     last = None
     for _attempt in range(MAX_FACE_RETRIES + 1):
-        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes)
+        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view)
         last = img
         if target_feat is None:
             return img  # 顔参照なし or 顔特徴が取れない → 判定せず採用
@@ -364,10 +448,15 @@ def generate_with_images(
     face_bytes: bytes | None,
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
+    back_view: bool = False,
 ) -> bytes:
     # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
     images = [_img_file("hairstyle.jpg", hair_bytes)]
-    labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
+    if back_view:
+        # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
+        labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
+    else:
+        labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
     idx = 2
     if face_bytes:
         images.append(_img_file("face.jpg", face_bytes))
@@ -381,7 +470,8 @@ def generate_with_images(
         images.append(_img_file("background.jpg", bg_bytes))
         labels.append(f"Image {idx} = Background reference.")
 
-    prompt = SYSTEM_INSTRUCTION + "\n\n" + " ".join(labels)
+    instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
+    prompt = instruction + "\n\n" + " ".join(labels)
 
     # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
     # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
@@ -481,8 +571,18 @@ if step == 0:
     uploaded = st.file_uploader("画像を選択してください", type=["jpg", "jpeg", "png"], key="u_hair")
     if uploaded:
         st.image(uploaded, width=320)
+
+        orientation = st.radio(
+            "このヘア写真の向き",
+            ["自動判定", "正面・横", "後ろ姿"],
+            index=["自動判定", "正面・横", "後ろ姿"].index(st.session_state.hair_orientation),
+            horizontal=True,
+            help="後ろ姿（後頭部）の写真の場合は、巻き・長さ・色・質感を引き継いで正面モデルに作り直します。通常は『自動判定』でOK。",
+        )
+
         if st.button("次へ →", type="primary", use_container_width=True):
             st.session_state.hair_img = uploaded.read()
+            st.session_state.hair_orientation = orientation
             st.session_state.step = 1
             st.rerun()
 
@@ -578,12 +678,26 @@ elif step == 4:
             usage_sha = set_usage(usage_count + 1, usage_sha)
 
         try:
+            # ヘア写真の向きを判定（後ろ姿なら属性抽出→正面再構成モード）。
+            choice = st.session_state.hair_orientation
+            if choice == "後ろ姿":
+                back_view = True
+            elif choice == "正面・横":
+                back_view = False
+            else:  # 自動判定：ヘア画像に顔が無ければ後ろ姿とみなす
+                back_view = not hairstyle_has_face(st.session_state.hair_img)
+
+            if back_view:
+                st.caption("🔄 後ろ姿モード：巻き・長さ・色・質感を引き継いで正面モデルに再構成します")
+
             # 顔画像がある時は、ヘアスタイル画像の顔をぼかしてから渡す
             # （モデルがヘア画像の顔をコピーして顔がブレるのを防ぐ）。1回だけ処理。
+            # 後ろ姿モードでは潰す顔が無いのでぼかしは行わない。
             hair_for_gen = st.session_state.hair_img
             target_feat = None
             if st.session_state.face_img:
-                hair_for_gen = blur_hairstyle_face(st.session_state.hair_img)
+                if not back_view:
+                    hair_for_gen = blur_hairstyle_face(st.session_state.hair_img)
                 # アップ顔の特徴量を1回だけ算出（メインスレッドでモデルを温める）
                 target_feat = face_feature(st.session_state.face_img)
 
@@ -593,6 +707,7 @@ elif step == 4:
                 st.session_state.outfit_img,
                 st.session_state.bg_img,
                 target_feat,
+                back_view,
             )
 
             # 3パターンを同時並行で生成（順次だと枚数分の時間がかかるため）。
