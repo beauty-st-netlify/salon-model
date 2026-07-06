@@ -8,6 +8,8 @@ import time
 import requests
 import concurrent.futures
 import threading
+import functools
+import hashlib
 
 st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
 
@@ -266,12 +268,14 @@ Image2 の髪・服・背景は使わない（顔だけ使う）。
 最終出力は画像のみ。テキスト禁止。説明禁止。補足禁止。質問禁止。"""
 
 
+@functools.lru_cache(maxsize=8)
 def normalize_for_api(img_bytes: bytes, max_side: int = 2048) -> bytes:
     """アップ画像を gpt-image edit API が確実に受け付ける形に正規化する。
 
     スマホ画像などで RGBA / CMYK / パレット等のモードや特殊形式だと
     「Invalid image file or mode」で弾かれるため、必ず RGB の PNG に変換し、
     長辺が大きすぎる場合は縮小する。失敗時は原本を返す。
+    同じ画像は生成リトライ・複数パターンで何度も通るため lru_cache で1回だけ変換する。
     """
     try:
         from PIL import Image
@@ -425,6 +429,57 @@ def face_similarity(feat_a, feat_b) -> float:
         return float(recognizer.match(feat_a, feat_b, cosine_flag))
     except Exception:
         return -1.0
+
+
+# ---------- 前処理の先行実行キャッシュ ----------
+# 生成ボタンを押してから顔判定・ぼかし・特徴量計算・正規化を始めると数秒待つため、
+# 各画像のアップロード直後（ユーザーが次のステップを操作している間）に裏スレッドで
+# 済ませておく。キーは画像バイト列のハッシュなので、差し替え時も自動で作り直される。
+_prep_cache: dict = {}
+
+
+def _prep_key(kind: str, img_bytes: bytes):
+    return (kind, hashlib.md5(img_bytes).hexdigest())
+
+
+def _prep_get(kind: str, img_bytes: bytes, compute):
+    """キャッシュにあれば即返す。無ければその場で計算（従来動作のフォールバック）。"""
+    key = _prep_key(kind, img_bytes)
+    if key in _prep_cache:
+        return _prep_cache[key]
+    val = compute(img_bytes)
+    _prep_cache[key] = val
+    return val
+
+
+def _face_feature_locked(img_bytes: bytes):
+    """顔モデルは複数スレッドから同時に使えないため、必ずロック越しに計算する。"""
+    with _face_lock:
+        return face_feature(img_bytes)
+
+
+def preprocess_async(kind: str, img_bytes: bytes):
+    """アップロード直後に重い前処理を裏で開始する。kind: hair / face / other"""
+    if not img_bytes:
+        return
+
+    def run():
+        try:
+            if len(_prep_cache) > 32:  # 念のためのメモリ上限
+                _prep_cache.clear()
+            if kind == "hair":
+                _prep_cache[_prep_key("has_face", img_bytes)] = hairstyle_has_face(img_bytes)
+                blurred = blur_hairstyle_face(img_bytes)
+                _prep_cache[_prep_key("blur", img_bytes)] = blurred
+                normalize_for_api(blurred)
+            elif kind == "face":
+                # 顔モデルのDL・初期化もここで温まる
+                _prep_cache[_prep_key("feat", img_bytes)] = _face_feature_locked(img_bytes)
+            normalize_for_api(img_bytes)
+        except Exception:
+            pass  # 失敗しても生成時にフォールバック計算されるだけなので無害
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False):
@@ -583,6 +638,7 @@ if step == 0:
         if st.button("次へ →", type="primary", use_container_width=True):
             st.session_state.hair_img = uploaded.read()
             st.session_state.hair_orientation = orientation
+            preprocess_async("hair", st.session_state.hair_img)  # 顔判定・ぼかしを先に裏で実行
             st.session_state.step = 1
             st.rerun()
 
@@ -600,6 +656,7 @@ elif step == 1:
     with col1:
         if uploaded and st.button("次へ →", type="primary", use_container_width=True):
             st.session_state.face_img = uploaded.read()
+            preprocess_async("face", st.session_state.face_img)  # 顔特徴量を先に裏で計算
             st.session_state.step = 2
             st.rerun()
     with col2:
@@ -622,6 +679,7 @@ elif step == 2:
     with col1:
         if uploaded and st.button("次へ →", type="primary", use_container_width=True):
             st.session_state.outfit_img = uploaded.read()
+            preprocess_async("other", st.session_state.outfit_img)  # API用の正規化を先に実行
             st.session_state.step = 3
             st.rerun()
     with col2:
@@ -644,6 +702,7 @@ elif step == 3:
     with col1:
         if uploaded and st.button("生成する →", type="primary", use_container_width=True):
             st.session_state.bg_img = uploaded.read()
+            preprocess_async("other", st.session_state.bg_img)  # API用の正規化を先に実行
             st.session_state.step = 4
             st.rerun()
     with col2:
@@ -673,19 +732,24 @@ elif step == 4:
         placeholders = [c.empty() for c in preview_cols]
         start_time = time.time()
 
-        # この生成を1回ぶん消費（多重起動・リロードでの超過を防ぐため生成前に記録）
+        # この生成を1回ぶん消費（多重起動・リロードでの超過を防ぐため生成前に記録）。
+        # GitHubへの書き込みは1〜2秒かかるため、生成と並行して裏スレッドで行う。
+        inc_future = None
         if usage_count is not None:
-            usage_sha = set_usage(usage_count + 1, usage_sha)
+            _usage_ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            inc_future = _usage_ex.submit(set_usage, usage_count + 1, usage_sha)
+            _usage_ex.shutdown(wait=False)
 
         try:
             # ヘア写真の向きを判定（後ろ姿なら属性抽出→正面再構成モード）。
+            # アップロード時に先行計算したキャッシュがあれば即座に使う。
             choice = st.session_state.hair_orientation
             if choice == "後ろ姿":
                 back_view = True
             elif choice == "正面・横":
                 back_view = False
             else:  # 自動判定：ヘア画像に顔が無ければ後ろ姿とみなす
-                back_view = not hairstyle_has_face(st.session_state.hair_img)
+                back_view = not _prep_get("has_face", st.session_state.hair_img, hairstyle_has_face)
 
             if back_view:
                 st.caption("🔄 後ろ姿モード：巻き・長さ・色・質感を引き継いで正面モデルに再構成します")
@@ -697,9 +761,9 @@ elif step == 4:
             target_feat = None
             if st.session_state.face_img:
                 if not back_view:
-                    hair_for_gen = blur_hairstyle_face(st.session_state.hair_img)
-                # アップ顔の特徴量を1回だけ算出（メインスレッドでモデルを温める）
-                target_feat = face_feature(st.session_state.face_img)
+                    hair_for_gen = _prep_get("blur", st.session_state.hair_img, blur_hairstyle_face)
+                # アップ顔の特徴量（アップロード時に先行計算済みならキャッシュから即取得）
+                target_feat = _prep_get("feat", st.session_state.face_img, _face_feature_locked)
 
             args = (
                 hair_for_gen,
@@ -730,9 +794,14 @@ elif step == 4:
             st.rerun()
 
         except Exception as e:
-            # 生成失敗時は消費した1回ぶんを戻す
-            if usage_count is not None and usage_sha is not None:
-                set_usage(usage_count, usage_sha)
+            # 生成失敗時は消費した1回ぶんを戻す（裏で行った加算の完了を待ってから）
+            if inc_future is not None:
+                try:
+                    new_sha = inc_future.result(timeout=30)
+                except Exception:
+                    new_sha = None
+                if new_sha is not None:
+                    set_usage(usage_count, new_sha)
             st.error(f"エラーが発生しました: {e}")
             if st.button("最初からやり直す"):
                 for k in list(st.session_state.keys()):
@@ -793,10 +862,13 @@ elif step == 4:
         with gen_col1:
             if st.button("✨ この内容で生成", type="primary", use_container_width=True):
                 # 差し替えがあったスロットだけ session に反映（getvalueは非破壊で複数回押しても安全）
+                _prep_kind = {"hair_img": "hair", "face_img": "face"}
                 for key, _label, _required in slots:
                     up = st.session_state.get(f"re_{key}")
                     if up is not None:
                         st.session_state[key] = up.getvalue()
+                        # 新しい画像の前処理を先に裏で開始（差し替え無しの分はキャッシュ済み）
+                        preprocess_async(_prep_kind.get(key, "other"), st.session_state[key])
                 st.session_state.result_imgs = None
                 st.rerun()
         with gen_col2:
