@@ -1,0 +1,25 @@
+# Streamlit Community Cloud は12時間アクセスが無いとアプリがスリープし、
+# 次に開いた人が起動待ち（10〜30秒）を食らう。それを防ぐため6時間ごとに
+# ヘッドレスChromeで実際にページを開いて「閲覧あり」の状態を維持する。
+# （単純なcurlだと閲覧と見なされない場合があるため、実ブラウザで45秒滞在する）
+name: keep-awake
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # 6時間ごと（UTC）
+  workflow_dispatch: {}      # 手動実行も可
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Visit app with headless Chrome
+        run: |
+          google-chrome --headless=new --disable-gpu --no-sandbox \
+            --user-data-dir=/tmp/chrome-profile \
+            "https://salon-model.streamlit.app/" &
+          CHROME_PID=$!
+          sleep 45
+          kill "$CHROME_PID" || true
+          echo "visited salon-model.streamlit.app"

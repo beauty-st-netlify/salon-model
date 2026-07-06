@@ -482,11 +482,11 @@ def preprocess_async(kind: str, img_bytes: bytes):
     threading.Thread(target=run, daemon=True).start()
 
 
-def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False):
+def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False, on_partial=None):
     """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。"""
     last = None
     for _attempt in range(MAX_FACE_RETRIES + 1):
-        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view)
+        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view, on_partial)
         last = img
         if target_feat is None:
             return img  # 顔参照なし or 顔特徴が取れない → 判定せず採用
@@ -504,6 +504,7 @@ def generate_with_images(
     outfit_bytes: bytes | None,
     bg_bytes: bytes | None,
     back_view: bool = False,
+    on_partial=None,
 ) -> bytes:
     # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
     images = [_img_file("hairstyle.jpg", hair_bytes)]
@@ -530,7 +531,7 @@ def generate_with_images(
 
     # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
     # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
-    result = client.images.edit(
+    kwargs = dict(
         model="gpt-image-2",
         image=images,
         prompt=prompt,
@@ -539,6 +540,29 @@ def generate_with_images(
         output_format="jpeg",       # 公式ドキュメント曰く png より高速。転送量も減る
         output_compression=90,      # 実用上ほぼ無劣化の圧縮率
     )
+
+    # ストリーミング：生成途中の下書き画像を on_partial で先出しし、体感の待ち時間を減らす。
+    # SDK・API側が未対応だった場合は下の通常呼び出しにフォールバックする。
+    if on_partial is not None:
+        try:
+            stream = client.images.edit(stream=True, partial_images=2, **kwargs)
+            final_b64 = None
+            for event in stream:
+                etype = getattr(event, "type", "")
+                b64 = getattr(event, "b64_json", None)
+                if etype == "image_edit.partial_image" and b64:
+                    try:
+                        on_partial(base64.b64decode(b64))
+                    except Exception:
+                        pass  # プレビュー表示の失敗は生成を止めない
+                elif etype == "image_edit.completed" and b64:
+                    final_b64 = b64
+            if final_b64:
+                return base64.b64decode(final_b64)
+        except (TypeError, openai.OpenAIError):
+            pass  # ストリーミング非対応なら通常生成へ
+
+    result = client.images.edit(**kwargs)
 
     b64 = result.data[0].b64_json
     if not b64:
@@ -778,19 +802,37 @@ elif step == 4:
 
             # 3パターンを同時並行で生成（順次だと枚数分の時間がかかるため）。
             # 各パターンは顔が一致するまで自動リトライ（generate_pattern内）。
+            # 生成途中の下書き（ストリーミング）もスレッドから partials に届き、1秒ごとに画面へ反映。
             results = [None] * NUM_PATTERNS
+            partials = {}  # idx -> 最新の途中経過画像（生成スレッドが書き込む）
+            shown = {}
+
+            def _partial_cb(idx):
+                return lambda img_b: partials.__setitem__(idx, img_b)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_PATTERNS) as ex:
-                future_to_idx = {ex.submit(generate_pattern, *args): i for i in range(NUM_PATTERNS)}
-                done = 0
-                for fut in concurrent.futures.as_completed(future_to_idx):
-                    i = future_to_idx[fut]
-                    results[i] = fut.result()
-                    done += 1
-                    # できた順にその場で表示
-                    placeholders[i].image(results[i], caption=f"パターン{i+1}", use_container_width=True)
-                    progress.progress(int((done / NUM_PATTERNS) * 100))
+                future_to_idx = {
+                    ex.submit(generate_pattern, *args, on_partial=_partial_cb(i)): i
+                    for i in range(NUM_PATTERNS)
+                }
+                done_idx = set()
+                while len(done_idx) < NUM_PATTERNS:
+                    for fut, i in list(future_to_idx.items()):
+                        if i in done_idx:
+                            continue
+                        if fut.done():
+                            results[i] = fut.result()  # 例外はここで外のexceptへ
+                            done_idx.add(i)
+                            placeholders[i].image(results[i], caption=f"パターン{i+1}", use_container_width=True)
+                        elif partials.get(i) is not None and shown.get(i) is not partials[i]:
+                            # できた順の完成表示に加えて、途中経過の下書きも先出しする
+                            shown[i] = partials[i]
+                            placeholders[i].image(shown[i], caption=f"パターン{i+1} 生成中…（下書き）", use_container_width=True)
+                    progress.progress(int((len(done_idx) / NUM_PATTERNS) * 100))
                     elapsed = int(time.time() - start_time)
-                    status.info(f"{done} / {NUM_PATTERNS} パターン完了（経過 {elapsed} 秒）")
+                    status.info(f"{len(done_idx)} / {NUM_PATTERNS} パターン完了（経過 {elapsed} 秒）")
+                    if len(done_idx) < NUM_PATTERNS:
+                        time.sleep(1)
 
             st.session_state.result_imgs = results
             st.rerun()
