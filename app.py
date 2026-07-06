@@ -536,6 +536,8 @@ def generate_with_images(
         prompt=prompt,
         size="1024x1536",
         quality="medium",
+        output_format="jpeg",       # 公式ドキュメント曰く png より高速。転送量も減る
+        output_compression=90,      # 実用上ほぼ無劣化の圧縮率
     )
 
     b64 = result.data[0].b64_json
@@ -818,8 +820,8 @@ elif step == 4:
             st.download_button(
                 f"⬇️ パターン{i+1} をダウンロード",
                 data=img,
-                file_name=f"salon_model_{ts_base}_{i+1}.png",
-                mime="image/png",
+                file_name=f"salon_model_{ts_base}_{i+1}.jpg",
+                mime="image/jpeg",
                 use_container_width=True,
                 key=f"dl_{i}",
             )
