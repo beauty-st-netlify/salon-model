@@ -11,7 +11,7 @@ import threading
 import functools
 import hashlib
 
-st.set_page_config(page_title="サロンモデル化くん", page_icon="✂️", layout="centered")
+st.set_page_config(page_title="サロンモデル化くん（B案）", page_icon="✂️", layout="centered")
 
 # ---------- セッション初期化 ----------
 for key, val in [
@@ -34,7 +34,7 @@ NUM_PATTERNS = 2
 USAGE_LIMIT = 3
 GITHUB_REPO = "beauty-st-netlify/salon-model"
 USAGE_BRANCH = "usage-data"
-USAGE_PATH = "usage_count.json"
+USAGE_PATH = "usage_count_b.json"  # B案専用カウンタ（A案の usage_count.json とは独立）
 
 # 顔の類似度による自動リトライ設定
 MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
@@ -529,14 +529,16 @@ def generate_with_images(
     instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
     prompt = instruction + "\n\n" + " ".join(labels)
 
-    # gpt-image-2 = ChatGPT Images 2.0 と同じ最新モデル。全入力を自動で高忠実度処理する
-    # ため input_fidelity は指定不可（顔・細部の保持はデフォルトで有効）。
+    # B案：低コスト検証用に gpt-image-1-mini を使用（出力 $8/Mtok = gpt-image-2 の約1/4）。
+    # gpt-image-1 系は入力の忠実度が自動で高くならないため input_fidelity="high" を明示する
+    # （顔・髪の細部保持のため）。未対応エラー時は下で外して再試行する。
     kwargs = dict(
-        model="gpt-image-2",
+        model="gpt-image-1-mini",
         image=images,
         prompt=prompt,
         size="1024x1536",
         quality="medium",
+        input_fidelity="high",
         output_format="jpeg",       # 公式ドキュメント曰く png より高速。転送量も減る
         output_compression=90,      # 実用上ほぼ無劣化の圧縮率
     )
@@ -562,7 +564,14 @@ def generate_with_images(
         except (TypeError, openai.OpenAIError):
             pass  # ストリーミング非対応なら通常生成へ
 
-    result = client.images.edit(**kwargs)
+    try:
+        result = client.images.edit(**kwargs)
+    except openai.BadRequestError:
+        # input_fidelity 未対応モデル/SDK だった場合は外して1回だけ再試行
+        if "input_fidelity" not in kwargs:
+            raise
+        kwargs.pop("input_fidelity")
+        result = client.images.edit(**kwargs)
 
     b64 = result.data[0].b64_json
     if not b64:
@@ -615,7 +624,7 @@ def set_usage(count, sha):
 
 # ---------- UI ----------
 
-st.title("✂️ サロンモデル化くん")
+st.title("✂️ サロンモデル化くん（B案・gpt-image-1-mini）")
 
 
 @st.cache_data(ttl=15, show_spinner=False)
