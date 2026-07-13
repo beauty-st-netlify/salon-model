@@ -31,7 +31,7 @@ NUM_PATTERNS = 2
 # テスト用の合計生成回数の上限（全ユーザー共通）。
 # カウンタは GitHub リポジトリの専用ブランチ usage-data 上の usage_count.json に永続保存する
 # （main とは別ブランチなので、書き込んでもアプリの再デプロイは発生しない）。
-USAGE_LIMIT = 3
+USAGE_LIMIT = 10  # B案検証中は多めに確保（先方公開時は3に戻す）
 GITHUB_REPO = "beauty-st-netlify/salon-model"
 USAGE_BRANCH = "usage-data"
 USAGE_PATH = "usage_count_b.json"  # B案専用カウンタ（A案の usage_count.json とは独立）
@@ -359,7 +359,7 @@ def blur_hairstyle_face(img_bytes: bytes) -> bytes:
             min(x + w - pad_x, pil.width),
             min(y + h - pad_y, pil.height),
         )
-        region = pil.crop(box).filter(ImageFilter.GaussianBlur(radius=max(8, max(w, h) // 6)))
+        region = pil.crop(box).filter(ImageFilter.GaussianBlur(radius=max(16, max(w, h) // 4)))
         pil.paste(region, box)
 
         out = io.BytesIO()
@@ -512,11 +512,11 @@ def generate_with_images(
         # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
         labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
     else:
-        labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference."]
+        labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference. Its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate the blurred face; discard it completely and paint the face reference person's face there instead."]
     idx = 2
     if face_bytes:
         images.append(_img_file("face.jpg", face_bytes))
-        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
+        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
         idx += 1
     if outfit_bytes:
         images.append(_img_file("outfit.jpg", outfit_bytes))
