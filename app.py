@@ -507,17 +507,40 @@ def generate_with_images(
     on_partial=None,
 ) -> bytes:
     # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
-    images = [_img_file("hairstyle.jpg", hair_bytes)]
-    if back_view:
-        # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
-        labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
+    # 調整3: edits は1枚目の画像を「土台」として最も強く保持する性質があるため、
+    # 顔画像があるときは順番を入れ替えて 1枚目=顔（土台・同一性維持）/ 2枚目=ヘアスタイル
+    # にする。顔がヘアモデルと平均化される問題への対策実験。後ろ姿モードは従来順のまま。
+    face_first = bool(face_bytes) and not back_view
+
+    if face_first:
+        images = [_img_file("face.jpg", face_bytes), _img_file("hairstyle.jpg", hair_bytes)]
+        labels = [
+            "Image 1 = BASE image and Face reference — keep this person's face/identity EXACTLY as-is (eyes, nose, mouth, face shape, skin tone unchanged). A third party must recognize the output as the SAME person as Image 1. REPLACE this image's hair completely with the hairstyle from Image 2, and replace the clothing/background according to the other reference images.",
+            "Image 2 = Hairstyle reference — use ONLY its hair (style/color/shape/length/texture). Do NOT use its face; its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate it.",
+        ]
+        idx = 3
+        # 指示文中の Image1/Image2 の番号だけ入れ替える（役割の記述は逐語のまま）
+        instruction = (
+            SYSTEM_INSTRUCTION
+            .replace("Image1", "§SWAP1§").replace("Image2", "§SWAP2§")
+            .replace("§SWAP1§", "Image2").replace("§SWAP2§", "Image1")
+            .replace("最初にアップロードされた画像は必ずヘアスタイル画像として扱います。",
+                     "Image1 は顔画像、Image2 はヘアスタイル画像として扱います。")
+        )
     else:
-        labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference. Its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate the blurred face; discard it completely and paint the face reference person's face there instead."]
-    idx = 2
-    if face_bytes:
-        images.append(_img_file("face.jpg", face_bytes))
-        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
-        idx += 1
+        images = [_img_file("hairstyle.jpg", hair_bytes)]
+        if back_view:
+            # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
+            labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
+        else:
+            labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference. Its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate the blurred face; discard it completely and paint the face reference person's face there instead."]
+        idx = 2
+        if face_bytes:
+            images.append(_img_file("face.jpg", face_bytes))
+            labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
+            idx += 1
+        instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
+
     if outfit_bytes:
         images.append(_img_file("outfit.jpg", outfit_bytes))
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
@@ -526,7 +549,6 @@ def generate_with_images(
         images.append(_img_file("background.jpg", bg_bytes))
         labels.append(f"Image {idx} = Background reference.")
 
-    instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
     prompt = instruction + "\n\n" + " ".join(labels)
 
     # B案：低コスト検証用に gpt-image-1-mini を使用（出力 $8/Mtok = gpt-image-2 の約1/4）。
