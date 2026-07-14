@@ -554,12 +554,16 @@ def generate_with_images(
     # B案：低コスト検証用に gpt-image-1-mini を使用（出力 $8/Mtok = gpt-image-2 の約1/4）。
     # 調整2: input_fidelity="high" を撤去。高忠実度指定がベース画像（ヘアモデル）の
     # 顔の保持を強めて、顔参照より優先されてしまう疑いがあるため単変数で検証する。
+    # 調整4: 土台=顔画像(調整3) と input_fidelity="high" の組み合わせ。
+    # 公式ドキュメント上、input_fidelity=high は「入力画像の顔を保持したい時」の機能で、
+    # 土台に顔を置いた状態と組み合わせるのが本来の使い方（この組み合わせは未検証だった）。
     kwargs = dict(
         model="gpt-image-1-mini",
         image=images,
         prompt=prompt,
         size="1024x1536",
         quality="medium",
+        input_fidelity="high",
         output_format="jpeg",       # 公式ドキュメント曰く png より高速。転送量も減る
         output_compression=90,      # 実用上ほぼ無劣化の圧縮率
     )
