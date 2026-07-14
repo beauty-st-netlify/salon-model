@@ -1,6 +1,5 @@
 import streamlit as st
-from google import genai
-from google.genai import types as genai_types
+import openai
 import base64
 import datetime
 import json
@@ -12,7 +11,7 @@ import threading
 import functools
 import hashlib
 
-st.set_page_config(page_title="サロンモデル化くん（C案）", page_icon="✂️", layout="centered")
+st.set_page_config(page_title="サロンモデル化くん（B案）", page_icon="✂️", layout="centered")
 
 # ---------- セッション初期化 ----------
 for key, val in [
@@ -42,14 +41,10 @@ MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回
 FACE_SIM_THRESHOLD = 0.42     # SFaceのコサイン類似度。これ未満=別人とみなして作り直す（高いほど厳しい。標準0.363）
 _face_lock = threading.Lock() # 顔モデルを複数スレッドから安全に使うためのロック
 
-# C案：Nano Banana 2 Lite（Gemini 3.1 Flash Lite Image）。1枚固定 $0.0336 ≈ 5円。
-# 複数参照画像の合成と人物同一性の維持が強みのモデル系統。
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
-
 try:
-    gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except Exception:
-    st.error("Gemini APIキーが設定されていません。Streamlit Cloud の Secrets に GEMINI_API_KEY を追加してください。")
+    st.error("OpenAI APIキーが設定されていません。Streamlit Cloud の Secrets に OPENAI_API_KEY を追加してください。")
     st.stop()
 
 
@@ -511,8 +506,8 @@ def generate_with_images(
     back_view: bool = False,
     on_partial=None,
 ) -> bytes:
-    # 実画像そのものを複数参照として Gemini に渡して合成する。
-    images = [normalize_for_api(hair_bytes)]
+    # MyGPT と同じ経路：実画像そのものを gpt-image-1 の画像編集(edits)へ複数入力する。
+    images = [_img_file("hairstyle.jpg", hair_bytes)]
     if back_view:
         # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
         labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
@@ -520,48 +515,67 @@ def generate_with_images(
         labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference. Its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate the blurred face; discard it completely and paint the face reference person's face there instead."]
     idx = 2
     if face_bytes:
-        images.append(normalize_for_api(face_bytes))
+        images.append(_img_file("face.jpg", face_bytes))
         labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
         idx += 1
     if outfit_bytes:
-        images.append(normalize_for_api(outfit_bytes))
+        images.append(_img_file("outfit.jpg", outfit_bytes))
         labels.append(f"Image {idx} = Outfit reference (clothing only, no bags/accessories).")
         idx += 1
     if bg_bytes:
-        images.append(normalize_for_api(bg_bytes))
+        images.append(_img_file("background.jpg", bg_bytes))
         labels.append(f"Image {idx} = Background reference.")
 
     instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
-    prompt = (
-        instruction
-        + "\n\n" + " ".join(labels)
-        + "\n\n上記ルールに厳密に従い、1枚の人物画像だけを生成すること。出力は画像のみ。"
+    prompt = instruction + "\n\n" + " ".join(labels)
+
+    # B案：低コスト検証用に gpt-image-1-mini を使用（出力 $8/Mtok = gpt-image-2 の約1/4）。
+    # 調整2: input_fidelity="high" を撤去。高忠実度指定がベース画像（ヘアモデル）の
+    # 顔の保持を強めて、顔参照より優先されてしまう疑いがあるため単変数で検証する。
+    kwargs = dict(
+        model="gpt-image-1-mini",
+        image=images,
+        prompt=prompt,
+        size="1024x1536",
+        quality="medium",
+        output_format="jpeg",       # 公式ドキュメント曰く png より高速。転送量も減る
+        output_compression=90,      # 実用上ほぼ無劣化の圧縮率
     )
 
-    contents = [prompt]
-    for b in images:
-        contents.append(genai_types.Part.from_bytes(data=b, mime_type="image/png"))
+    # ストリーミング：生成途中の下書き画像を on_partial で先出しし、体感の待ち時間を減らす。
+    # SDK・API側が未対応だった場合は下の通常呼び出しにフォールバックする。
+    if on_partial is not None:
+        try:
+            stream = client.images.edit(stream=True, partial_images=2, **kwargs)
+            final_b64 = None
+            for event in stream:
+                etype = getattr(event, "type", "")
+                b64 = getattr(event, "b64_json", None)
+                if etype == "image_edit.partial_image" and b64:
+                    try:
+                        on_partial(base64.b64decode(b64))
+                    except Exception:
+                        pass  # プレビュー表示の失敗は生成を止めない
+                elif etype == "image_edit.completed" and b64:
+                    final_b64 = b64
+            if final_b64:
+                return base64.b64decode(final_b64)
+        except (TypeError, openai.OpenAIError):
+            pass  # ストリーミング非対応なら通常生成へ
 
-    # 縦長ポートレート（2:3）・1K で生成。SDK 版差異に備えて config 無しにフォールバック。
-    # ※このモデルは on_partial（途中経過ストリーミング）非対応のため無視する。
     try:
-        config = genai_types.GenerateContentConfig(
-            image_config=genai_types.ImageConfig(aspect_ratio="2:3"),
-        )
-        resp = gemini_client.models.generate_content(
-            model=GEMINI_IMAGE_MODEL, contents=contents, config=config,
-        )
-    except Exception:
-        resp = gemini_client.models.generate_content(
-            model=GEMINI_IMAGE_MODEL, contents=contents,
-        )
+        result = client.images.edit(**kwargs)
+    except openai.BadRequestError:
+        # input_fidelity 未対応モデル/SDK だった場合は外して1回だけ再試行
+        if "input_fidelity" not in kwargs:
+            raise
+        kwargs.pop("input_fidelity")
+        result = client.images.edit(**kwargs)
 
-    for cand in (resp.candidates or []):
-        for part in (cand.content.parts or []):
-            inline = getattr(part, "inline_data", None)
-            if inline and inline.data:
-                return inline.data
-    raise Exception("画像が生成されませんでした。もう一度お試しください。")
+    b64 = result.data[0].b64_json
+    if not b64:
+        raise Exception("画像が生成されませんでした。もう一度お試しください。")
+    return base64.b64decode(b64)
 
 
 # ---------- テスト用の利用回数カウンタ（GitHub リポジトリに永続保存） ----------
@@ -609,7 +623,7 @@ def set_usage(count, sha):
 
 # ---------- UI ----------
 
-st.title("✂️ サロンモデル化くん（C案・Nano Banana 2 Lite）")
+st.title("✂️ サロンモデル化くん（B案・gpt-image-1-mini）")
 
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -856,8 +870,8 @@ elif step == 4:
             st.download_button(
                 f"⬇️ パターン{i+1} をダウンロード",
                 data=img,
-                file_name=f"salon_model_{ts_base}_{i+1}.png",
-                mime="image/png",
+                file_name=f"salon_model_{ts_base}_{i+1}.jpg",
+                mime="image/jpeg",
                 use_container_width=True,
                 key=f"dl_{i}",
             )
