@@ -37,7 +37,7 @@ USAGE_BRANCH = "usage-data"
 USAGE_PATH = "usage_count_b.json"  # B案専用カウンタ（A案の usage_count.json とは独立）
 
 # 顔の類似度による自動リトライ設定
-MAX_FACE_RETRIES = 2          # 顔が一致しない時に作り直す最大回数（0で無効）
+MAX_FACE_RETRIES = 5          # 顔が一致しない時に作り直す最大回数（0で無効）。miniは1生成が安いため多め（検証中）
 FACE_SIM_THRESHOLD = 0.42     # SFaceのコサイン類似度。これ未満=別人とみなして作り直す（高いほど厳しい。標準0.363）
 _face_lock = threading.Lock() # 顔モデルを複数スレッドから安全に使うためのロック
 
@@ -483,19 +483,30 @@ def preprocess_async(kind: str, img_bytes: bytes):
 
 
 def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False, on_partial=None):
-    """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。"""
+    """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。
+
+    戻り値は (画像bytes, 試行ごとの類似度スコアのリスト)。スコアが空=顔判定なし。
+    全滅時は最後の1枚ではなく「いちばん本人に近かった1枚」を返す。
+    """
     last = None
+    sims = []
+    best = None  # (sim, img)
     for _attempt in range(MAX_FACE_RETRIES + 1):
         img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view, on_partial)
         last = img
         if target_feat is None:
-            return img  # 顔参照なし or 顔特徴が取れない → 判定せず採用
+            return img, sims  # 顔参照なし or 顔特徴が取れない → 判定せず採用
         with _face_lock:
             feat = face_feature(img)
-            sim = face_similarity(target_feat, feat) if feat is not None else 1.0
-        if feat is None or sim >= FACE_SIM_THRESHOLD:
-            return img  # 一致 or 判定不能 → 採用
-    return last  # 上限まで作り直しても不一致なら最後の1枚を返す
+            sim = face_similarity(target_feat, feat) if feat is not None else None
+        if sim is None:
+            return img, sims  # 判定不能 → 採用（従来動作）
+        sims.append(sim)
+        if sim >= FACE_SIM_THRESHOLD:
+            return img, sims  # 本人判定 → 採用
+        if best is None or sim > best[0]:
+            best = (sim, img)
+    return (best[1] if best else last), sims  # 全滅 → 最も本人に近い1枚
 
 
 def generate_with_images(
@@ -838,6 +849,7 @@ elif step == 4:
             # 各パターンは顔が一致するまで自動リトライ（generate_pattern内）。
             # 生成途中の下書き（ストリーミング）もスレッドから partials に届き、1秒ごとに画面へ反映。
             results = [None] * NUM_PATTERNS
+            result_sims = [None] * NUM_PATTERNS  # 各パターンの類似度スコア履歴（診断用）
             partials = {}  # idx -> 最新の途中経過画像（生成スレッドが書き込む）
             shown = {}
 
@@ -855,7 +867,7 @@ elif step == 4:
                         if i in done_idx:
                             continue
                         if fut.done():
-                            results[i] = fut.result()  # 例外はここで外のexceptへ
+                            results[i], result_sims[i] = fut.result()  # 例外はここで外のexceptへ
                             done_idx.add(i)
                             placeholders[i].image(results[i], caption=f"パターン{i+1}", use_container_width=True)
                         elif partials.get(i) is not None and shown.get(i) is not partials[i]:
@@ -869,6 +881,7 @@ elif step == 4:
                         time.sleep(1)
 
             st.session_state.result_imgs = results
+            st.session_state.result_sims = result_sims
             st.rerun()
 
         except Exception as e:
@@ -893,6 +906,13 @@ elif step == 4:
         for i, img in enumerate(st.session_state.result_imgs):
             st.markdown(f"**パターン {i+1}**")
             st.image(img, use_container_width=True)
+            # 検証用の診断表示：顔の本人度スコア（SFaceコサイン類似度、合格ライン=FACE_SIM_THRESHOLD）
+            sims = (st.session_state.get("result_sims") or [None] * len(st.session_state.result_imgs))[i]
+            if sims:
+                st.caption(
+                    f"🔬 顔の本人度: 採用 {max(sims):.3f} / 合格ライン {FACE_SIM_THRESHOLD}"
+                    f"（試行 {len(sims)} 回: " + ", ".join(f"{s:.3f}" for s in sims) + "）"
+                )
             st.download_button(
                 f"⬇️ パターン{i+1} をダウンロード",
                 data=img,
