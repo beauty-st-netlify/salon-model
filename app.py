@@ -42,9 +42,10 @@ MAX_FACE_RETRIES = 5          # 顔が一致しない時に作り直す最大回
 FACE_SIM_THRESHOLD = 0.42     # SFaceのコサイン類似度。これ未満=別人とみなして作り直す（高いほど厳しい。標準0.363）
 _face_lock = threading.Lock() # 顔モデルを複数スレッドから安全に使うためのロック
 
-# C案：Nano Banana 2 Lite（Gemini 3.1 Flash Lite Image）。1枚固定 $0.0336 ≈ 5円。
-# 複数参照画像の合成と人物同一性の維持が強みのモデル系統。
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
+# C案：Nano Banana 2（Gemini 3.1 Flash Image）。1K画像 $0.067 ≈ 10円/枚。
+# Lite($0.0336)は顔のムラと髪の細部再現が弱かったため1段上げた。
+# さらに上は Nano Banana Pro ("gemini-3-pro-image", $0.134)。
+GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 try:
     gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
