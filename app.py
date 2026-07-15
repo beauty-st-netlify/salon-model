@@ -519,6 +519,38 @@ def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat
     return (best[1] if best else last), sims, attempts  # 全滅 → 最も本人に近い1枚
 
 
+def _gemini_generate(contents):
+    """Gemini 呼び出し。503(混雑)/429/500 等の一時エラーはバックオフ付きで自動再試行する。
+
+    縦長ポートレート（2:3）指定で生成し、SDK 版差異で config が受け付けられない
+    場合（TypeError/ValueError）のみ config 無しにフォールバックする。
+    ※このモデルは on_partial（途中経過ストリーミング）非対応。
+    """
+    last_err = None
+    for wait in (0, 5, 15, 30):
+        if wait:
+            time.sleep(wait)
+        try:
+            try:
+                config = genai_types.GenerateContentConfig(
+                    image_config=genai_types.ImageConfig(aspect_ratio="2:3"),
+                )
+                return gemini_client.models.generate_content(
+                    model=GEMINI_IMAGE_MODEL, contents=contents, config=config,
+                )
+            except (TypeError, ValueError):
+                return gemini_client.models.generate_content(
+                    model=GEMINI_IMAGE_MODEL, contents=contents,
+                )
+        except Exception as e:
+            msg = str(e)
+            if any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL")):
+                last_err = e  # 一時エラー → 待って再試行
+                continue
+            raise
+    raise Exception(f"モデルが混雑しています。少し時間をおいて再度お試しください。（{last_err}）")
+
+
 def generate_with_images(
     hair_bytes: bytes,
     face_bytes: bytes | None,
@@ -568,19 +600,7 @@ def generate_with_images(
     for b in images:
         contents.append(genai_types.Part.from_bytes(data=b, mime_type="image/png"))
 
-    # 縦長ポートレート（2:3）で生成。SDK 版差異に備えて config 無しにフォールバック。
-    # ※このモデルは on_partial（途中経過ストリーミング）非対応のため無視する。
-    try:
-        config = genai_types.GenerateContentConfig(
-            image_config=genai_types.ImageConfig(aspect_ratio="2:3"),
-        )
-        resp = gemini_client.models.generate_content(
-            model=GEMINI_IMAGE_MODEL, contents=contents, config=config,
-        )
-    except Exception:
-        resp = gemini_client.models.generate_content(
-            model=GEMINI_IMAGE_MODEL, contents=contents,
-        )
+    resp = _gemini_generate(contents)
 
     for cand in (resp.candidates or []):
         for part in (cand.content.parts or []):
