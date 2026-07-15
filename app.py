@@ -378,6 +378,49 @@ def blur_hairstyle_face(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def blur_face_surroundings(img_bytes: bytes) -> bytes:
+    """顔参照画像の「顔以外」（髪・服・背景）を強くぼかし、顔だけシャープに残す。
+
+    顔写真に写っている本人の髪をモデルが拾い、出力のヘアスタイルが
+    顔写真側に引っ張られるのを防ぐ目的（ヘア画像の顔ぼかしと対称の処理）。
+    顔検出に失敗した場合は原本をそのまま返す（無害なフォールバック）。
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageFilter
+
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr = np.array(pil)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        if len(faces) == 0:
+            return img_bytes
+
+        # 一番大きい顔（＝メインの人物）を対象にする
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        # 輪郭・顎・額を欠かさないよう box を少し外側に広げる（髪はなるべく含めない）
+        pad_x, pad_y = int(w * 0.15), int(h * 0.2)
+        box = (
+            max(x - pad_x, 0),
+            max(y - pad_y, 0),
+            min(x + w + pad_x, pil.width),
+            min(y + h + pad_y, pil.height),
+        )
+        blurred = pil.filter(ImageFilter.GaussianBlur(radius=max(24, max(pil.size) // 20)))
+        blurred.paste(pil.crop(box), box)
+
+        out = io.BytesIO()
+        blurred.save(out, format="JPEG", quality=95)
+        return out.getvalue()
+    except Exception:
+        # OpenCV未導入・検出失敗などは原本にフォールバック
+        return img_bytes
+
+
 @st.cache_resource(show_spinner=False)
 def _load_face_models():
     """OpenCV の顔検出(YuNet)・顔認識(SFace)モデルを読み込む。
@@ -483,6 +526,7 @@ def preprocess_async(kind: str, img_bytes: bytes):
             elif kind == "face":
                 # 顔モデルのDL・初期化もここで温まる
                 _prep_cache[_prep_key("feat", img_bytes)] = _face_feature_locked(img_bytes)
+                _prep_cache[_prep_key("face_noh", img_bytes)] = blur_face_surroundings(img_bytes)
             normalize_for_api(img_bytes)
         except Exception:
             pass  # 失敗しても生成時にフォールバック計算されるだけなので無害
@@ -570,7 +614,7 @@ def generate_with_images(
     idx = 2
     if face_bytes:
         images.append(normalize_for_api(face_bytes))
-        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Use ONLY the face; IGNORE this image's hair, clothing, and background.")
+        labels.append(f"Image {idx} = Face reference — the OUTPUT face/identity MUST be this person. Copy this person's facial features exactly (eyes, nose, mouth, face shape, skin tone). A third party must recognize the output as the SAME person as Image {idx}. Everything except the face is INTENTIONALLY BLURRED in this image — use ONLY the sharp face area. NEVER copy or reconstruct this image's hair/hairstyle; the hair must come ONLY from the hairstyle reference (Image 1).")
         idx += 1
     if outfit_bytes:
         images.append(normalize_for_api(outfit_bytes))
@@ -824,16 +868,19 @@ elif step == 4:
             # （モデルがヘア画像の顔をコピーして顔がブレるのを防ぐ）。1回だけ処理。
             # 後ろ姿モードでは潰す顔が無いのでぼかしは行わない。
             hair_for_gen = st.session_state.hair_img
+            face_for_gen = st.session_state.face_img
             target_feat = None
             if st.session_state.face_img:
                 if not back_view:
                     hair_for_gen = _prep_get("blur", st.session_state.hair_img, blur_hairstyle_face)
-                # アップ顔の特徴量（アップロード時に先行計算済みならキャッシュから即取得）
+                # 顔写真は「顔以外」をぼかして渡す（顔写真の髪に出力ヘアが引っ張られる対策）。
+                # 本人度チェック用の特徴量は原本から取る（判定精度を落とさないため）。
+                face_for_gen = _prep_get("face_noh", st.session_state.face_img, blur_face_surroundings)
                 target_feat = _prep_get("feat", st.session_state.face_img, _face_feature_locked)
 
             args = (
                 hair_for_gen,
-                st.session_state.face_img,
+                face_for_gen,
                 st.session_state.outfit_img,
                 st.session_state.bg_img,
                 target_feat,
