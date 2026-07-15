@@ -410,7 +410,9 @@ def blur_face_surroundings(img_bytes: bytes) -> bytes:
             min(x + w + pad_x, pil.width),
             min(y + h + pad_y, pil.height),
         )
-        blurred = pil.filter(ImageFilter.GaussianBlur(radius=max(24, max(pil.size) // 20)))
+        # 強すぎるぼかしはモデルが顔参照ごと軽視する副作用があったため中程度に留める
+        # （髪の毛束・質感が判別できなくなる程度で十分。1回目から顔を拾わせるのが目的）
+        blurred = pil.filter(ImageFilter.GaussianBlur(radius=max(14, max(pil.size) // 45)))
         blurred.paste(pil.crop(box), box)
 
         out = io.BytesIO()
@@ -633,11 +635,15 @@ def generate_with_images(
 
     # リトライ時は補正文を足す：同一入力の再送だと似た（同じくハズレの）出力を繰り返す
     # 傾向への対策。試行番号を含めることで出力の相関も切る。
+    # ※顔のことだけ言うと顔写真に全振りした出力（構図・髪まで顔写真のコピー）になるため、
+    #   「直すのは顔だけ・他のルールはそのまま」と両方向で明示する。
     if attempt > 0 and face_bytes:
         prompt += (
-            f"\n\n【再生成 {attempt} 回目】前回の出力は顔参照と同一人物にならなかった（不合格）。"
-            "今回は最優先で、出力の顔を顔参照の人物と完全に同一にすること。"
-            "目・鼻・口・輪郭・肌をその人物のまま描き、正面向きで顔がはっきり見える構図にすること。"
+            f"\n\n【再生成 {attempt} 回目】前回の出力は顔が顔参照と同一人物にならなかった（不合格）。"
+            "今回直すのは顔だけ：目・鼻・口・輪郭・肌を顔参照の人物と同一にすること。"
+            "それ以外は変えない：ヘアスタイル・髪色は引き続きヘアスタイル参照（Image 1）に完全一致させ、"
+            "構図・スケール・ポーズも従来ルールのまま。"
+            "顔参照画像の構図・角度・ぼかされた周辺部を出力にコピーしてはいけない。"
         )
 
     contents = [prompt]
