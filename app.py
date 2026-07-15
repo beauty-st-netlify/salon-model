@@ -497,7 +497,7 @@ def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat
     sims = []
     best = None  # (sim, img)
     for _attempt in range(MAX_FACE_RETRIES + 1):
-        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view, on_partial)
+        img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view, on_partial, attempt=_attempt)
         last = img
         if target_feat is None:
             return img, sims  # 顔参照なし or 顔特徴が取れない → 判定せず採用
@@ -521,6 +521,7 @@ def generate_with_images(
     bg_bytes: bytes | None,
     back_view: bool = False,
     on_partial=None,
+    attempt: int = 0,
 ) -> bytes:
     # 実画像そのものを複数参照として Gemini に渡して合成する（順番は従来通りヘアが先頭）。
     images = [normalize_for_api(hair_bytes)]
@@ -548,6 +549,15 @@ def generate_with_images(
         + "\n\n" + " ".join(labels)
         + "\n\n上記ルールに厳密に従い、1枚の人物画像だけを生成すること。出力は画像のみ。"
     )
+
+    # リトライ時は補正文を足す：同一入力の再送だと似た（同じくハズレの）出力を繰り返す
+    # 傾向への対策。試行番号を含めることで出力の相関も切る。
+    if attempt > 0 and face_bytes:
+        prompt += (
+            f"\n\n【再生成 {attempt} 回目】前回の出力は顔参照と同一人物にならなかった（不合格）。"
+            "今回は最優先で、出力の顔を顔参照の人物と完全に同一にすること。"
+            "目・鼻・口・輪郭・肌をその人物のまま描き、正面向きで顔がはっきり見える構図にすること。"
+        )
 
     contents = [prompt]
     for b in images:
