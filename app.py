@@ -12,7 +12,7 @@ import threading
 import functools
 import hashlib
 
-st.set_page_config(page_title="サロンモデル化くん（C案）", page_icon="✂️", layout="centered")
+st.set_page_config(page_title="サロンモデル化くん（C案・Nano Banana 2）", page_icon="✂️", layout="centered")
 
 # ---------- セッション初期化 ----------
 for key, val in [
@@ -612,7 +612,7 @@ def generate_with_images(
         # 後ろ姿/横向き：後頭部を貼らず、巻き・長さ・色・質感を抽出して正面に再構成させる
         labels = ["Image 1 = Hairstyle reference shown from the BACK or SIDE. Do NOT copy the back of the head onto the front. Extract ONLY the curl pattern, wave size, length, layering, volume, hair color and its root-to-tip gradient, and texture, then RECONSTRUCT a natural FRONT-FACING version of this hairstyle (infer bangs/face-framing with the same perm texture and color). The output face/identity comes from the face reference."]
     else:
-        labels = ["Image 1 = Hairstyle reference — use ONLY its hair (style/color/shape/length). Do NOT use its face; the output face comes from the face reference. Its face area is INTENTIONALLY BLURRED — never reconstruct, sharpen, or imitate the blurred face; discard it completely and paint the face reference person's face there instead."]
+        labels = ["Image 1 = BASE image (hairstyle). The output MUST be this exact image, EDITED — not a new picture inspired by it. Keep the hair pixel-faithful and unchanged: same bangs, part line, length, layers, silhouette, hair flow, curl, ends, volume, left-right balance, hair color and its root-to-tip gradient, texture. Do NOT redraw or restyle the hair. The ONLY areas you may change: (a) the INTENTIONALLY BLURRED face area — never reconstruct or imitate it; paint the face reference person's face there instead, (b) the clothing (per the outfit reference), (c) the background (per the background reference). Keep Image 1's composition, scale, head size and position as-is."]
     idx = 2
     if face_bytes:
         images.append(normalize_for_api(face_bytes))
@@ -627,11 +627,12 @@ def generate_with_images(
         labels.append(f"Image {idx} = Background reference.")
 
     instruction = SYSTEM_INSTRUCTION_BACK if back_view else SYSTEM_INSTRUCTION
-    prompt = (
-        instruction
-        + "\n\n" + " ".join(labels)
-        + "\n\n上記ルールに厳密に従い、1枚の人物画像だけを生成すること。出力は画像のみ。"
+    tail = (
+        "\n\n上記ルールに厳密に従い、Image 1 を編集した1枚の人物画像として生成すること。出力は画像のみ。"
+        if not back_view else
+        "\n\n上記ルールに厳密に従い、1枚の人物画像だけを生成すること。出力は画像のみ。"
     )
+    prompt = instruction + "\n\n" + " ".join(labels) + tail
 
     # リトライ時は補正文を足す：同一入力の再送だと似た（同じくハズレの）出力を繰り返す
     # 傾向への対策。試行番号を含めることで出力の相関も切る。
@@ -705,7 +706,7 @@ def set_usage(count, sha):
 
 # ---------- UI ----------
 
-st.title("✂️ サロンモデル化くん（C案・Nano Banana 2 Lite）")
+st.title("✂️ サロンモデル化くん（C案・Nano Banana 2）")
 
 
 @st.cache_data(ttl=15, show_spinner=False)
