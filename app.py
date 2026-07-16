@@ -423,6 +423,45 @@ def blur_face_surroundings(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def crop_face_region(img_bytes: bytes) -> bytes:
+    """顔参照写真から顔領域だけを切り出す。
+
+    顔写真に写っている髪・服・背景の情報をモデルに一切渡さないための処理
+    （ぼかしでは髪の形・長さが透けて出力ヘアが引っ張られたため、切り出しに強化）。
+    検出失敗時は周辺ぼかし版にフォールバックする。
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr = np.array(pil)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        if len(faces) == 0:
+            return blur_face_surroundings(img_bytes)
+
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        # 輪郭・顎・額を欠かさないよう外側に広げる（髪の大部分は枠外に落ちる）
+        pad_x, pad_y = int(w * 0.25), int(h * 0.3)
+        box = (
+            max(x - pad_x, 0),
+            max(y - pad_y, 0),
+            min(x + w + pad_x, pil.width),
+            min(y + h + pad_y, pil.height),
+        )
+        face = pil.crop(box)
+        out = io.BytesIO()
+        face.save(out, format="JPEG", quality=95)
+        return out.getvalue()
+    except Exception:
+        return blur_face_surroundings(img_bytes)
+
+
 @st.cache_resource(show_spinner=False)
 def _load_face_models():
     """OpenCV の顔検出(YuNet)・顔認識(SFace)モデルを読み込む。
@@ -528,7 +567,7 @@ def preprocess_async(kind: str, img_bytes: bytes):
             elif kind == "face":
                 # 顔モデルのDL・初期化もここで温まる
                 _prep_cache[_prep_key("feat", img_bytes)] = _face_feature_locked(img_bytes)
-                _prep_cache[_prep_key("face_noh", img_bytes)] = blur_face_surroundings(img_bytes)
+                _prep_cache[_prep_key("face_crop", img_bytes)] = crop_face_region(img_bytes)
             normalize_for_api(img_bytes)
         except Exception:
             pass  # 失敗しても生成時にフォールバック計算されるだけなので無害
@@ -536,16 +575,122 @@ def preprocess_async(kind: str, img_bytes: bytes):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _edit_clothes_bg(hair_bytes, outfit_bytes, bg_bytes):
+    """2段方式の1段目：ヘアスタイル画像をベースに服・背景だけを差し替える。
+
+    顔写真をこの段に渡さないことで、出力ヘアが顔写真の髪に引っ張られる
+    余地を物理的に無くす（髪・構図はベース画像のまま残る）。
+    """
+    parts = [
+        "Image 1 = ベース画像（編集対象）。出力は Image 1 そのものの編集版として生成すること。",
+        "髪（前髪・分け目・長さ・シルエット・毛流れ・毛先・髪色とそのグラデーション・質感）、"
+        "頭の位置・大きさ、構図、スケールは一切変更しない。",
+        "顔がぼかされている場合はぼかしたまま残す（顔を再構成・鮮明化しない）。",
+    ]
+    images = [normalize_for_api(hair_bytes)]
+    idx = 2
+    if outfit_bytes:
+        images.append(normalize_for_api(outfit_bytes))
+        parts.append(
+            f"Image {idx} = 服装参照。Image 1 の服だけを Image {idx} の服に差し替える。"
+            "服の色は完全一致で維持（黒化・彩度低下・トーン統一・色補正の禁止）。"
+            "バッグ・カバン・ストラップ・小物・アクセサリーは削除し、生成もしない。"
+        )
+        idx += 1
+    if bg_bytes:
+        images.append(normalize_for_api(bg_bytes))
+        parts.append(
+            f"Image {idx} = 背景参照。Image 1 の背景だけを Image {idx} に差し替える。"
+            "人物の位置・スケールは変えない。髪色・服色を背景に合わせて補正してはいけない。"
+        )
+    parts.append("最終出力は画像のみ。テキスト禁止。")
+
+    contents = ["\n".join(parts)]
+    for b in images:
+        contents.append(genai_types.Part.from_bytes(data=b, mime_type="image/png"))
+    resp = _gemini_generate(contents)
+    for cand in (resp.candidates or []):
+        for part in (cand.content.parts or []):
+            inline = getattr(part, "inline_data", None)
+            if inline and inline.data:
+                return inline.data
+    raise Exception("画像が生成されませんでした。もう一度お試しください。")
+
+
+def _swap_face(base_bytes, face_bytes, attempt=0):
+    """2段方式の2段目：1段目の結果をベースに、ぼかされた顔領域だけを本人の顔に描き替える。
+
+    顔参照は crop_face_region() で顔だけに切り出したものを渡す（髪情報を持ち込まない）。
+    """
+    parts = [
+        "Image 1 = ベース画像（編集対象）。出力は Image 1 そのものの編集版として生成すること。",
+        "変更してよいのは顔だけ：Image 1 のぼかされた顔領域を、Image 2 の人物の顔に描き替える。",
+        "目・鼻・口・輪郭・肌は Image 2 の人物と完全に同一にし、第三者が同一人物と認識できるようにする。",
+        "顔の向き・角度・大きさ・照明は Image 1 の頭の位置に自然に馴染ませる。",
+        "髪・前髪・服・背景・構図・色は一切変更しない。前髪が顔にかかる部分は Image 1 の前髪を最前面で優先する。",
+        "Image 2 の髪型・髪色は絶対に使わない（Image 2 は顔の情報源としてのみ扱う）。",
+    ]
+    if attempt > 0:
+        parts.append(
+            f"【再生成 {attempt} 回目】前回の出力は顔が Image 2 の人物と同一にならなかった（不合格）。"
+            "今回は顔の同一性を最優先で高めること。それ以外は引き続き一切変更しない。"
+        )
+    parts.append("最終出力は画像のみ。テキスト禁止。")
+
+    contents = ["\n".join(parts)]
+    for b in (base_bytes, face_bytes):
+        contents.append(genai_types.Part.from_bytes(data=normalize_for_api(b), mime_type="image/png"))
+    resp = _gemini_generate(contents)
+    for cand in (resp.candidates or []):
+        for part in (cand.content.parts or []):
+            inline = getattr(part, "inline_data", None)
+            if inline and inline.data:
+                return inline.data
+    raise Exception("画像が生成されませんでした。もう一度お試しください。")
+
+
 def generate_pattern(hair_bytes, face_bytes, outfit_bytes, bg_bytes, target_feat, back_view=False, on_partial=None):
     """1パターン生成。顔が target_feat と一致しなければ上限まで作り直す。
 
     戻り値は (画像bytes, 試行ごとの類似度スコアのリスト, 生成回数)。スコアが空=顔判定なし。
     全滅時は最後の1枚ではなく「いちばん本人に近かった1枚」を返す。
+
+    正面＋顔参照ありの時は2段方式：
+      1段目 = ヘア画像ベースに服・背景差し替え（顔写真を渡さない→髪が引っ張られない）
+      2段目 = ぼかし顔領域だけを本人の顔に描き替え（リトライはこの段だけやり直す）
+    後ろ姿モード・顔参照なしの時は従来の一発生成。
     """
+    attempts = 0
+    if face_bytes and not back_view:
+        base = hair_bytes
+        if outfit_bytes or bg_bytes:
+            base = _edit_clothes_bg(hair_bytes, outfit_bytes, bg_bytes)
+            attempts += 1
+        last = None
+        sims = []
+        best = None  # (sim, img)
+        for _attempt in range(MAX_FACE_RETRIES + 1):
+            img = _swap_face(base, face_bytes, attempt=_attempt)
+            attempts += 1
+            last = img
+            if target_feat is None:
+                return img, sims, attempts
+            with _face_lock:
+                feat = face_feature(img)
+                sim = face_similarity(target_feat, feat) if feat is not None else None
+            if sim is None:
+                return img, sims, attempts  # 判定不能 → 採用（従来動作）
+            sims.append(sim)
+            if sim >= FACE_SIM_THRESHOLD:
+                return img, sims, attempts  # 本人判定 → 採用
+            if best is None or sim > best[0]:
+                best = (sim, img)
+        return (best[1] if best else last), sims, attempts  # 全滅 → 最も本人に近い1枚
+
+    # 従来の一発生成（後ろ姿モード or 顔参照なし）
     last = None
     sims = []
     best = None  # (sim, img)
-    attempts = 0
     for _attempt in range(MAX_FACE_RETRIES + 1):
         img = generate_with_images(hair_bytes, face_bytes, outfit_bytes, bg_bytes, back_view, on_partial, attempt=_attempt)
         attempts += 1
@@ -880,9 +1025,9 @@ elif step == 4:
             if st.session_state.face_img:
                 if not back_view:
                     hair_for_gen = _prep_get("blur", st.session_state.hair_img, blur_hairstyle_face)
-                # 顔写真は「顔以外」をぼかして渡す（顔写真の髪に出力ヘアが引っ張られる対策）。
+                # 顔写真は「顔だけ切り出し」て渡す（顔写真の髪に出力ヘアが引っ張られる対策）。
                 # 本人度チェック用の特徴量は原本から取る（判定精度を落とさないため）。
-                face_for_gen = _prep_get("face_noh", st.session_state.face_img, blur_face_surroundings)
+                face_for_gen = _prep_get("face_crop", st.session_state.face_img, crop_face_region)
                 target_feat = _prep_get("feat", st.session_state.face_img, _face_feature_locked)
 
             args = (
