@@ -27,7 +27,7 @@ for key, val in [
     if key not in st.session_state:
         st.session_state[key] = val
 
-NUM_PATTERNS = 2
+NUM_PATTERNS = 1  # テスト中は1パターンずつ（本番化の際に数を再検討）
 
 # テスト用の合計生成回数の上限（全ユーザー共通）。
 # カウンタは GitHub リポジトリの専用ブランチ usage-data 上の usage_count.json に永続保存する
