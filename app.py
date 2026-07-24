@@ -314,10 +314,17 @@ def _img_file(name: str, img_bytes: bytes):
 
 
 def hairstyle_has_face(img_bytes: bytes) -> bool:
-    """ヘアスタイル画像に正面顔が写っているかを判定する。
+    """ヘアスタイル画像に顔（正面 or 横顔）が写っているかを判定する。
 
-    顔が検出できない＝後ろ姿/横向きの可能性が高い、という自動判定に使う。
-    検出処理に失敗した場合は安全側に True（=正面扱い・従来動作）を返す。
+    向きの完全自動判定に使う（UIの手動選択は廃止済み・ユーザーの誤操作を排除）。
+    - 顔が検出できた＝正面/横向き → True（back_view=False：ピクセル維持で忠実合成）
+    - どの向きでも顔が全く検出できない＝後ろ姿 → False（back_view=True：属性抽出→正面再構成）
+
+    設計方針（重要）：グレーゾーンは必ず「正面（True）」に倒す。
+    理由＝後ろ姿を正面と誤爆すると後頭部を前面に貼って露骨に崩れる（客も気づく事故）が、
+    正面/横をピクセル維持で処理するのは元々の忠実合成なので無害。迷ったら無害側が鉄則。
+    そのため正面カスケードに加え横顔カスケード（左右反転も）を併用し、
+    検出処理が例外で落ちた場合も安全側の True を返す。
     """
     try:
         import cv2
@@ -326,11 +333,26 @@ def hairstyle_has_face(img_bytes: bytes) -> bool:
 
         pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         gray = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-        return len(faces) > 0
+
+        def _detect(xml: str, image) -> bool:
+            cascade = cv2.CascadeClassifier(cv2.data.haarcascades + xml)
+            if cascade.empty():
+                return False
+            faces = cascade.detectMultiScale(
+                image, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+            )
+            return len(faces) > 0
+
+        # ① 正面顔
+        if _detect("haarcascade_frontalface_default.xml", gray):
+            return True
+        # ② 横顔（profileface は一方向のみ検出できるので左右反転も試す）
+        if _detect("haarcascade_profileface.xml", gray):
+            return True
+        if _detect("haarcascade_profileface.xml", cv2.flip(gray, 1)):
+            return True
+        # どの向きでも顔なし＝後ろ姿とみなす
+        return False
     except Exception:
         return True
 
@@ -889,17 +911,10 @@ if step == 0:
     if uploaded:
         st.image(uploaded, width=320)
 
-        orientation = st.radio(
-            "このヘア写真の向き",
-            ["自動判定", "正面・横", "後ろ姿"],
-            index=["自動判定", "正面・横", "後ろ姿"].index(st.session_state.hair_orientation),
-            horizontal=True,
-            help="後ろ姿（後頭部）の写真の場合は、巻き・長さ・色・質感を引き継いで正面モデルに作り直します。通常は『自動判定』でOK。",
-        )
-
+        # 向きは完全自動判定（手動選択は廃止：後ろ姿を「正面」と誤指定する等の
+        # 誤操作を排除し、挙動をシステム側で固定するため）。
         if st.button("次へ →", type="primary", use_container_width=True):
             st.session_state.hair_img = uploaded.read()
-            st.session_state.hair_orientation = orientation
             preprocess_async("hair", st.session_state.hair_img)  # 顔判定・ぼかしを先に裏で実行
             st.session_state.step = 1
             st.rerun()
@@ -1003,15 +1018,10 @@ elif step == 4:
             _usage_ex.shutdown(wait=False)
 
         try:
-            # ヘア写真の向きを判定（後ろ姿なら属性抽出→正面再構成モード）。
+            # ヘア写真の向きを完全自動で判定（後ろ姿なら属性抽出→正面再構成モード）。
+            # 手動選択は廃止。顔（正面/横顔）が検出できなければ後ろ姿とみなす。
             # アップロード時に先行計算したキャッシュがあれば即座に使う。
-            choice = st.session_state.hair_orientation
-            if choice == "後ろ姿":
-                back_view = True
-            elif choice == "正面・横":
-                back_view = False
-            else:  # 自動判定：ヘア画像に顔が無ければ後ろ姿とみなす
-                back_view = not _prep_get("has_face", st.session_state.hair_img, hairstyle_has_face)
+            back_view = not _prep_get("has_face", st.session_state.hair_img, hairstyle_has_face)
 
             if back_view:
                 st.caption("🔄 後ろ姿モード：巻き・長さ・色・質感を引き継いで正面モデルに再構成します")
